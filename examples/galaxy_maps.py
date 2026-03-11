@@ -527,9 +527,9 @@ if __name__ == "__main__":
     print("Example: Single galaxy maps")
     galaxy_maps(
         sx=sx,
-        galaxy_id=206146,
+        galaxy_id=211273,
         data=local_path+"/../obs/six_galaxies_data.hdf5",
-        size=25,
+        size=100,
         plot='maps',
         cmap='turbo',
         savefig=False,

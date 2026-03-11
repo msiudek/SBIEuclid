@@ -243,7 +243,7 @@ if __name__ == "__main__":
     print("Example: Single galaxy inference")
     p = galaxy_inference(
         sx, 
-        id=206146, 
+        id=211273, 
         data=local_path+"/obs/six_galaxies_data.hdf5",
         device='cpu',
         sn_limit=5.0,

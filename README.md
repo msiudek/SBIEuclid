@@ -211,13 +211,21 @@ SBIPIX/
 
 If you use SBIPIX in your research, please cite:
 ```bibtex
-@misc{iglesiasnavarro2025simulationbasedinferencegalaxyproperties,
-      title={Simulation-based inference of galaxy properties from JWST pixels}, 
-      author={Patricia Iglesias-Navarro and Marc Huertas-Company and Pablo Pérez-González and Johan H. Knapen and ChangHoon Hahn and Anton M. Koekemoer and Steven L. Finkelstein and Natalia Villanueva and Andrés Asensio Ramos},
-      year={2025},
-      eprint={2506.04336},
-      archivePrefix={arXiv},
-      primaryClass={astro-ph.GA},
-      url={https://arxiv.org/abs/2506.04336}, 
+@ARTICLE{2025A&A...703A.229I,
+       author = {{Iglesias-Navarro}, Patricia and {Huertas-Company}, Marc and {P{\'e}rez-Gonz{\'a}lez}, Pablo and {Knapen}, Johan H. and {Hahn}, ChangHoon and {Koekemoer}, Anton M. and {Finkelstein}, Steven L. and {Villanueva}, Natalia and {Asensio Ramos}, Andr{\'e}s},
+        title = "{Simulation-based inference of galaxy properties from JWST pixels}",
+      journal = {\aap},
+     keywords = {galaxies: evolution, galaxies: fundamental parameters, galaxies: star formation, galaxies: statistics, Astrophysics of Galaxies},
+         year = 2025,
+        month = nov,
+       volume = {703},
+          eid = {A229},
+        pages = {A229},
+          doi = {10.1051/0004-6361/202555810},
+archivePrefix = {arXiv},
+       eprint = {2506.04336},
+ primaryClass = {astro-ph.GA},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2025A&A...703A.229I},
+      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
 ```

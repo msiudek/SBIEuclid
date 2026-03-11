@@ -12,7 +12,7 @@ from sbi import inference as Inference
 import pickle
 import seaborn as sns
 import sklearn.metrics as sm
-from scipy import stats
+from scipy import stats, truncnorm
 from tqdm import tqdm, trange
 from astropy.io import fits
 from astropy.cosmology import FlatLambdaCDM
@@ -397,7 +397,7 @@ class sbipix():
         print('Observational features loaded')        
 
 
-    def add_noise_nan_limit_all(self):
+    def add_noise_nan_limit_all_old(self):
         """
         Add realistic observational effects to all simulated galaxies.
         
@@ -414,7 +414,7 @@ class sbipix():
             for i in range(len(self.obs[0,:])):
                 self.mag[j, i, :] = self._add_noise_nan_limit(self.obs[j][i], i)
 
-    def _add_noise_nan_limit(self, mag, filter_idx):
+    def _add_noise_nan_limit_old(self, mag, filter_idx):
         """
         Add noise and handle detection limits for a single magnitude measurement.
 
@@ -472,6 +472,108 @@ class sbipix():
             return [mag_n_noise, mag_err]
         else:
             return [mag, mag_err]
+        
+    
+    def add_noise_nan_limit_all(self):
+        """
+        Add realistic observational effects to all simulated galaxies (Vectorized).
+        
+        This includes:
+        - Photometric uncertainties based on magnitude
+        - Detection limits
+        - Non-detections (set to 99.0)
+        
+        Updates self.mag with processed photometry ready for training.
+        """
+        n_sims, n_filts = self.obs.shape
+        self.mag = np.zeros((n_sims, n_filts, 2))
+        
+        # We loop over FILTERS instead of GALAXIES. 
+        # This allows us to process all simulations instantly using numpy arrays.
+        for i in trange(n_filts, desc=f"Adding observational realism to {n_filts} filters"):
+            
+            # Extract the entire column of magnitudes for this filter
+            mags_filter = self.obs[:, i]
+            
+            # Process all galaxies for this filter at once
+            mag_n_noise, mag_err = self._add_noise_nan_limit(mags_filter, i)
+            
+            # Store results
+            self.mag[:, i, 0] = mag_n_noise
+            self.mag[:, i, 1] = mag_err
+
+    def _add_noise_nan_limit(self, mag_array, filter_idx):
+        """
+        Vectorized noise addition and detection limits for an array of magnitudes.
+
+        Parameters
+        ----------
+        mag_array : np.ndarray
+            Array of input magnitudes for a single filter (all galaxies).
+        filter_idx : int
+            Index of the filter.
+
+        Returns
+        -------
+        tuple
+            (noisy_magnitudes_array, uncertainties_array)
+        """
+        
+        
+        flux_array = mag_conversion(mag_array, convert_to='flux')
+
+        # 1. Determine limits
+        limit_flux = self.limits[filter_idx] #in microjy
+        limit_mag_err = mag_conversion(limit_flux, convert_to='mag')
+
+        # 2. Setup defaults for non-detections (Using 99.0)
+        final_mags = np.full_like(mag_array, 99.0)
+        final_errs = np.full_like(mag_array, limit_mag_err)
+
+        # 3. Create mask for detected pixels
+        if self.include_limit:
+            detected_mask = flux_array > limit_flux
+        else:
+            detected_mask = np.ones_like(flux_array, dtype=bool)
+
+        mags_det = mag_array[detected_mask]
+
+        if mags_det.size > 0:
+            # 4. Find magnitude bins dynamically (replaces the slow if/elif chain)
+            percentiles_f = self.percentiles[:, filter_idx]
+            bin_indices = np.digitize(mags_det, percentiles_f)
+            
+            # Clip to max bin index to avoid IndexError for very faint/bright sources
+            max_bin = self.mean_sigma_obs.shape[1] - 1
+            bin_indices = np.clip(bin_indices, 0, max_bin)
+
+            # 5. Extract statistics for the corresponding bins
+            pixel_means = self.mean_sigma_obs[filter_idx, bin_indices]
+            pixel_stds = self.stds_sigma_obs[filter_idx, bin_indices]
+
+            # 6. Correct Truncnorm Math (Truncate at 0)
+            a_std = (0.0 - pixel_means) / pixel_stds
+            
+            mag_errs_det = truncnorm.rvs(
+                a=a_std, 
+                b=np.inf, 
+                loc=pixel_means, 
+                scale=pixel_stds
+            )
+
+            # 7. Add noise
+            noise = np.random.normal(0.0, mag_errs_det)
+            
+            if self.include_sigma:
+                final_mags[detected_mask] = mags_det + noise
+            else:
+                final_mags[detected_mask] = mags_det
+                
+            final_errs[detected_mask] = mag_errs_det
+
+        return final_mags, final_errs    
+
+    
 
     def train(self, min_thetas=[6, -10, 0, 0, 0, -2.3, 0, 0], 
               max_thetas=[12, 3, 1, 1, 1, 0.4, 3, 10], 
@@ -619,6 +721,8 @@ class sbipix():
         if not self.infer_z:
             obs = np.concatenate([obs, np.reshape(self.theta[:, -1], (len(obs), 1))], axis=1)
 
+        print(obs)
+
         # Run inference on test set
         for j in trange(n_test, desc="Testing performance"):
             posterior_samples = np.array(
@@ -679,9 +783,7 @@ class sbipix():
         return np.array(posteriors)        
         
 
-    def get_posteriors_resolved(self, phot_arr, n_gal, n_samples=50, save=True, 
-                               return_stats=True, sigma_arr=None, bar=True, 
-                               input_z=None, device='cpu'):
+    def get_posteriors_resolved(self, phot_arr, n_gal, n_samples=50, save=True, return_stats=True,sigma_arr=None, bar=True, input_z=None, device='cpu'):
         """
         Generate posterior samples for resolved galaxy photometry.
 
@@ -714,14 +816,20 @@ class sbipix():
         # Apply detection limits and convert to magnitudes
         if self.include_limit:
             for i in range(len(phot_arr[0, :])):
+                # 1. Create mask BEFORE overwriting the array
+                is_non_detect = phot_arr[:, i] < self.limits[i]
+                
+                # 2. Update photometry using the mask
                 phot_arr[:, i] = np.where(
-                    phot_arr[:, i] < self.limits[i], 
-                    0, 
+                    is_non_detect, 
+                    99.0, # previously 0, but 99 is more standard for non-detections 
                     mag_conversion(phot_arr[:, i])
                 )
+                
+                # 3. Update errors using the SAME mask
                 if self.condition_sigma and sigma_arr is not None:
                     sigma_arr[:, i] = np.where(
-                        phot_arr[:, i] < self.limits[i], 
+                        is_non_detect, 
                         self.limits[i], 
                         np.abs(sigma_arr[:, i])
                     )
@@ -741,8 +849,7 @@ class sbipix():
                     if sigma_arr[i, j] == self.limits[j]:
                         full_arr[i, j, 1] = mag_conversion(self.limits[j], convert_to='mag')
                     else:
-                        full_arr[i, j, 1] = (sigma_arr[i, j] * 
-                                           np.abs(-2.5 / (np.log(10) * phot_arr[i, j])))
+                        full_arr[i, j, 1] = (sigma_arr[i, j] * np.abs(-2.5 / (np.log(10) * phot_arr[i, j])))
             
             mag_arr = np.reshape(full_arr, (len(phot_arr[:, 0]), len(phot_arr[0, :]) * 2))
         
