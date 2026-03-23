@@ -6,7 +6,6 @@ matplotlib>=3.8.0
 # Machine learning / SBI
 torch>=2.2.0
 sbi==0.23.3
-nflows>=0.14
 
 # Astronomy specific
 astropy>=6.0.0
