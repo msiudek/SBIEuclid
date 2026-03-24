@@ -40,6 +40,7 @@ __pycache__/
 
 # Virtual environments
 sbipix_env/
+sbi_env/
 venv/
 env/
 .env
@@ -94,6 +95,10 @@ target/
 # SBI logs and outputs
 sbi-logs/
 *.log
+library/*.dbatlas
+library/*.pkl
+obs/obs_properties/COSMOS_DEEP.fits
+obs/obs_properties/noise_compare_*.png
 
 # IPython
 profile_default/

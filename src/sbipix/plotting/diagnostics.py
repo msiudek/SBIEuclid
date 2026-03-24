@@ -243,12 +243,14 @@ def plot_test_performance(sbipix_model, n_test=1000, n_theta=None, save=False,
         )
         
         if save:
+            import os
+            os.makedirs('./sbi-logs', exist_ok=True)
             if name is None:
                 suffix = 'tau' if sbipix_model.parametric else 'dirichlet'
-                filename = f'./plots/test_performance_{suffix}_{i}.pdf'
+                filename = f'./sbi-logs/test_performance_{suffix}_{i}.png'
             else:
-                filename = f'./plots/{name}{i}.pdf'
-            plt.savefig(filename, bbox_inches='tight', dpi=300)
+                filename = f'./sbi-logs/{name}{i}.png'
+            plt.savefig(filename, bbox_inches='tight', dpi=150)
             print(f"Saved plot to {filename}")
         
         plt.show()
@@ -561,18 +563,24 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     
     # Load effective wavelengths
-    lam_eff_file = path_obs_properties + 'lam_eff.npy'
+    filter_path = getattr(sx, 'filter_path', path_obs_properties)
+    lam_eff_filename = getattr(sx, 'lam_eff_file', 'lam_eff.npy')
+    lam_eff_file = os.path.join(filter_path, lam_eff_filename)
+    n_filters = int(getattr(sx, 'n_filters', len(phot)))
+    n_filters = min(n_filters, len(phot), len(err))
     if os.path.exists(lam_eff_file):
-        lam_eff = np.load(lam_eff_file)[:19] / 1e4
+        lam_eff = np.load(lam_eff_file)[:n_filters] / 1e4
     else:
         # Default JADES effective wavelengths (in microns)
         lam_eff = np.array([0.90, 1.15, 1.50, 1.82, 2.00, 2.10, 2.77, 3.35, 3.56, 
                            4.10, 4.30, 4.44, 4.60, 4.80, 0.435, 0.606, 0.775, 0.814, 0.850])
+        lam_eff = lam_eff[:n_filters]
     
     # Load background limits if available
     if hasattr(sx, 'limits') or show_background:
         try:
-            limits = np.load(limits_file)
+            limits_path = os.path.join(filter_path, getattr(sx, 'limits_file', os.path.basename(limits_file)))
+            limits = np.load(limits_path)
         except:
             limits = None
     else:
@@ -581,8 +589,11 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
     # Apply limits to observations
     obs_sed = np.copy(phot)
     obs_err = np.copy(err)
+    obs_sed = obs_sed[:n_filters]
+    obs_err = obs_err[:n_filters]
     
     if limits is not None:
+        limits = limits[:n_filters]
         for i in range(len(limits)):
             if obs_sed[i] < limits[i]:
                 obs_sed[i] = limits[i]
@@ -622,8 +633,8 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
             
             # Calculate photometry
             filcurves, _, _ = make_filvalkit_simple(lam, z, 
-                                                  fkit_name='filters_jades_no_wfc.dat',
-                                                  filt_dir=path_obs_properties)
+                                                  fkit_name=sx.filter_list,
+                                                  filt_dir=filter_path)
             sed_csp_ujy = calc_fnu_sed_fast(spec_csp_ujy, filcurves)
             
             # Plot spectrum
@@ -698,8 +709,8 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
         
         # Calculate and plot best photometry
         filcurves, _, _ = make_filvalkit_simple(lam, z, 
-                                              fkit_name='filters_jades_no_wfc.dat',
-                                              filt_dir=path_obs_properties)
+                                              fkit_name=sx.filter_list,
+                                              filt_dir=filter_path)
         sed_best = calc_fnu_sed_fast(spec_best, filcurves)
         ax.plot(lam_eff, sed_best, 'o', markersize=10, alpha=0.8,
                markerfacecolor="None", markeredgecolor='tab:orange')

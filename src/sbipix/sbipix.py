@@ -12,7 +12,8 @@ from sbi import inference as Inference
 import pickle
 import seaborn as sns
 import sklearn.metrics as sm
-from scipy import stats, truncnorm
+from scipy import stats
+from scipy.stats import truncnorm
 from tqdm import tqdm, trange
 from astropy.io import fits
 from astropy.cosmology import FlatLambdaCDM
@@ -127,7 +128,14 @@ class sbipix():
         # Filter and data configuration
         self.n_filters = 19
         self.filter_list = 'filters_jades_no_wfc.dat'
-        self.filter_path = '../obs/obs_properties/'
+        self.filter_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'obs', 'obs_properties')
+        )
+        self.mean_sigma_file = 'mean_sigma_jades_res_bins.npy'
+        self.std_sigma_file = 'std_sigma_jades_res_bins.npy'
+        self.percentiles_file = 'percentiles_jades_res_bins.npy'
+        self.limits_file = 'background_noise_hainline.npy'
+        self.lam_eff_file = 'lam_eff.npy'
         self.atlas_name = 'atlas_obs_jades_no_wfc'
         self.atlas_path = './library/'
         
@@ -155,6 +163,10 @@ class sbipix():
         self.include_mask = False
         self.include_limit = False
         self.condition_sigma = False
+        self.noise_std_scale = 1.0
+        self.noise_bin_interpolation = False
+        self.noise_sigma_sampler = 'truncnorm'
+        self.noise_sigma_clip_max = None
         
         # Observational properties (loaded from files)
         self.mean_sigma_obs = None
@@ -189,6 +201,111 @@ class sbipix():
         
         # Analysis type
         self.type = 'Resolved'  # 'Integrated' or 'Resolved'
+
+        self.refresh_filter_metadata()
+
+    def _resolve_filter_list_path(self):
+        """Resolve absolute path to the filter list file."""
+        if os.path.isabs(self.filter_list):
+            return self.filter_list
+        return os.path.join(self.filter_path, self.filter_list)
+
+    def refresh_filter_metadata(self):
+        """Refresh filter metadata (currently infers number of filters from list file)."""
+        filter_list_path = self._resolve_filter_list_path()
+        try:
+            with open(filter_list_path, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f.readlines()]
+            valid_lines = [line for line in lines if line and not line.startswith('#')]
+            self.n_filters = len(valid_lines)
+        except OSError:
+            pass
+
+    def configure_filters(self, filter_list=None, filter_path=None,
+                          mean_sigma_file=None, std_sigma_file=None,
+                          percentiles_file=None, limits_file=None,
+                          lam_eff_file=None):
+        """Configure filter-related files in one place and refresh metadata."""
+        if filter_list is not None:
+            self.filter_list = filter_list
+        if filter_path is not None:
+            self.filter_path = filter_path
+        if mean_sigma_file is not None:
+            self.mean_sigma_file = mean_sigma_file
+        if std_sigma_file is not None:
+            self.std_sigma_file = std_sigma_file
+        if percentiles_file is not None:
+            self.percentiles_file = percentiles_file
+        if limits_file is not None:
+            self.limits_file = limits_file
+        if lam_eff_file is not None:
+            self.lam_eff_file = lam_eff_file
+
+        self.refresh_filter_metadata()
+
+    def configure_noise_model(self, std_scale=None, smooth_bins=None,
+                              sigma_sampler=None, sigma_clip_max=None):
+        """Configure how observational uncertainties are sampled."""
+        if std_scale is not None:
+            self.noise_std_scale = float(std_scale)
+        if smooth_bins is not None:
+            self.noise_bin_interpolation = bool(smooth_bins)
+        if sigma_sampler is not None:
+            self.noise_sigma_sampler = str(sigma_sampler)
+        if sigma_clip_max is not None:
+            self.noise_sigma_clip_max = float(sigma_clip_max)
+
+    def _interpolate_noise_stats(self, mags_det, filter_idx):
+        """Interpolate mean/std sigma across magnitude-bin centers."""
+        percentiles_f = np.asarray(self.percentiles[:, filter_idx], dtype=float)
+        means_f = np.asarray(self.mean_sigma_obs[filter_idx], dtype=float)
+        stds_f = np.asarray(self.stds_sigma_obs[filter_idx], dtype=float)
+
+        mean_fill = np.nanmedian(means_f[np.isfinite(means_f)]) if np.isfinite(means_f).any() else 0.1
+        std_fill = np.nanmedian(stds_f[np.isfinite(stds_f)]) if np.isfinite(stds_f).any() else 0.05
+        means_f = np.where(np.isfinite(means_f), means_f, mean_fill)
+        stds_f = np.where(np.isfinite(stds_f), stds_f, std_fill)
+
+        if len(percentiles_f) == 0 or not np.isfinite(percentiles_f).all():
+            return np.full_like(mags_det, mean_fill, dtype=float), np.full_like(mags_det, std_fill, dtype=float)
+
+        if len(percentiles_f) == 1:
+            centers = np.array([percentiles_f[0] - 0.5, percentiles_f[0] + 0.5])
+        else:
+            left_center = percentiles_f[0] - 0.5 * (percentiles_f[1] - percentiles_f[0])
+            right_center = percentiles_f[-1] + 0.5 * (percentiles_f[-1] - percentiles_f[-2])
+            centers = np.concatenate([
+                [left_center],
+                0.5 * (percentiles_f[:-1] + percentiles_f[1:]),
+                [right_center],
+            ])
+
+        pixel_means = np.interp(mags_det, centers, means_f, left=means_f[0], right=means_f[-1])
+        pixel_stds = np.interp(mags_det, centers, stds_f, left=stds_f[0], right=stds_f[-1])
+        return pixel_means, pixel_stds
+
+    def _sample_sigma_distribution(self, pixel_means, pixel_stds):
+        """Sample per-object uncertainty with optional inflation and clipping."""
+        pixel_means = np.maximum(np.asarray(pixel_means, dtype=float), 1e-6)
+        pixel_stds = np.maximum(np.asarray(pixel_stds, dtype=float) * self.noise_std_scale, 1e-6)
+
+        if self.noise_sigma_sampler == 'lognormal':
+            sigma2 = np.log1p((pixel_stds / pixel_means) ** 2)
+            mu = np.log(pixel_means) - 0.5 * sigma2
+            mag_errs_det = np.random.lognormal(mean=mu, sigma=np.sqrt(sigma2))
+        else:
+            a_std = (0.0 - pixel_means) / pixel_stds
+            mag_errs_det = truncnorm.rvs(
+                a=a_std,
+                b=np.inf,
+                loc=pixel_means,
+                scale=pixel_stds
+            )
+
+        if self.noise_sigma_clip_max is not None:
+            mag_errs_det = np.minimum(mag_errs_det, self.noise_sigma_clip_max)
+
+        return mag_errs_det
 
     def simulate(self, mass_max=12, mass_min=4, sfr_prior_type='SFRflat', 
                  sfr_min=-9, sfr_max=2, ssfr_min=-12.0, ssfr_max=-7.5, 
@@ -244,6 +361,8 @@ class sbipix():
         For non-parametric SFH, it uses dense_basis.generate_atlas with Dirichlet priors.
         """
         import dense_basis as db
+
+        self.refresh_filter_metadata()
         
         # Set up priors
         priors = db.Priors()
@@ -380,19 +499,27 @@ class sbipix():
         # Load observational features from the survey
 
         #mean of the distribution of noise in the galaxies for each filter and different bins of flux
-        self.mean_sigma_obs = np.load(self.filter_path+'mean_sigma_jades_res_bins.npy') 
+        self.mean_sigma_obs = np.load(os.path.join(self.filter_path, self.mean_sigma_file)) 
         #std of the distribution of noise in the galaxies for each filter and different bins of flux
-        self.stds_sigma_obs = np.load(self.filter_path+'std_sigma_jades_res_bins.npy') 
+        self.stds_sigma_obs = np.load(os.path.join(self.filter_path, self.std_sigma_file)) 
         #different bins of flux for each filter
-        self.percentiles = np.load(self.filter_path+'percentiles_jades_res_bins.npy')
+        self.percentiles = np.load(os.path.join(self.filter_path, self.percentiles_file))
         #1 sigma depth limits for each filter
-        self.limits=np.load(self.filter_path+'background_noise_hainline.npy') 
+        self.limits=np.load(os.path.join(self.filter_path, self.limits_file)) 
+
+        self.refresh_filter_metadata()
+        n_filters = self.n_filters
+        self.mean_sigma_obs = self.mean_sigma_obs[:n_filters, :]
+        self.stds_sigma_obs = self.stds_sigma_obs[:n_filters, :]
+        self.percentiles = self.percentiles[:, :n_filters]
+        self.limits = self.limits[:n_filters]
         
         if self.remove_filters is not None:
-                self.mean_sigma_obs = self.mean_sigma_obs[:, [i for i in range(len(self.mean_sigma_obs[0,:])) if i not in self.remove_filters]]
-                self.stds_sigma_obs = self.stds_sigma_obs[:, [i for i in range(len(self.stds_sigma_obs[0,:])) if i not in self.remove_filters]]
-                self.percentiles = self.percentiles[:, [i for i in range(len(self.percentiles[0,:])) if i not in self.remove_filters]]
-                self.limits =   self.limits[[i for i in range(len(self.limits)) if i not in self.remove_filters]]
+            keep = [i for i in range(self.mean_sigma_obs.shape[0]) if i not in self.remove_filters]
+            self.mean_sigma_obs = self.mean_sigma_obs[keep, :]
+            self.stds_sigma_obs = self.stds_sigma_obs[keep, :]
+            self.percentiles = self.percentiles[:, keep]
+            self.limits = self.limits[keep]
 
         print('Observational features loaded')        
 
@@ -540,26 +667,22 @@ class sbipix():
 
         if mags_det.size > 0:
             # 4. Find magnitude bins dynamically (replaces the slow if/elif chain)
-            percentiles_f = self.percentiles[:, filter_idx]
-            bin_indices = np.digitize(mags_det, percentiles_f)
-            
-            # Clip to max bin index to avoid IndexError for very faint/bright sources
-            max_bin = self.mean_sigma_obs.shape[1] - 1
-            bin_indices = np.clip(bin_indices, 0, max_bin)
+            if self.noise_bin_interpolation:
+                pixel_means, pixel_stds = self._interpolate_noise_stats(mags_det, filter_idx)
+            else:
+                percentiles_f = self.percentiles[:, filter_idx]
+                bin_indices = np.digitize(mags_det, percentiles_f)
 
-            # 5. Extract statistics for the corresponding bins
-            pixel_means = self.mean_sigma_obs[filter_idx, bin_indices]
-            pixel_stds = self.stds_sigma_obs[filter_idx, bin_indices]
+                # Clip to max bin index to avoid IndexError for very faint/bright sources
+                max_bin = self.mean_sigma_obs.shape[1] - 1
+                bin_indices = np.clip(bin_indices, 0, max_bin)
 
-            # 6. Correct Truncnorm Math (Truncate at 0)
-            a_std = (0.0 - pixel_means) / pixel_stds
-            
-            mag_errs_det = truncnorm.rvs(
-                a=a_std, 
-                b=np.inf, 
-                loc=pixel_means, 
-                scale=pixel_stds
-            )
+                # 5. Extract statistics for the corresponding bins
+                pixel_means = self.mean_sigma_obs[filter_idx, bin_indices]
+                pixel_stds = self.stds_sigma_obs[filter_idx, bin_indices]
+
+            # 6. Sample σ values from the configured distribution
+            mag_errs_det = self._sample_sigma_distribution(pixel_means, pixel_stds)
 
             # 7. Add noise
             noise = np.random.normal(0.0, mag_errs_det)
