@@ -372,6 +372,8 @@ def main():
             eff_n = (mock_weights[valid].sum() ** 2) / np.sum(mock_weights[valid] ** 2)
             print(f"    {match_msg}")
             print(f"    Applied weighted resampling for training (effective N ≈ {eff_n:.0f})")
+            if eff_n < 0.3 * sx.n_simulation:
+                print("    WARNING: low effective sample size after mock matching")
         else:
             print("    Mock matching requested, but all weights were zero. Keeping unweighted mocks.")
 
@@ -412,8 +414,8 @@ def main():
 
     print("[4/5] Training quick model...")
     n_train = len(sx.theta) if args.max_train_samples <= 0 else min(args.max_train_samples, len(sx.theta))
-    min_thetas = np.min(sx.theta[:n_train], axis=0)
-    max_thetas = np.max(sx.theta[:n_train], axis=0)
+    min_thetas = np.percentile(sx.theta[:n_train], 0.5, axis=0)
+    max_thetas = np.percentile(sx.theta[:n_train], 99.5, axis=0)
 
     sx.train(
         min_thetas=min_thetas,
