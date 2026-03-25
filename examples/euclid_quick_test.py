@@ -2,6 +2,7 @@ from pathlib import Path
 import argparse
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def build_parser():
@@ -88,6 +89,167 @@ def build_parser():
     return parser
 
 
+def _label_is_tau_or_metal(label):
+    ll = str(label).lower()
+    return ("tau" in ll) or ("[m/h]" in ll) or ("metal" in ll) or ("met" in ll)
+
+
+def _plot_train_val_loss(sx, out_dir):
+    anpe_path = Path(sx.model_path) / f"anpe_{sx.model_name}"
+    if not anpe_path.exists():
+        print("    Skipping train/val loss plot: no ANPE file found")
+        return
+
+    try:
+        import pickle
+        with open(anpe_path, "rb") as f:
+            anpe = pickle.load(f)
+    except Exception as exc:
+        print(f"    Skipping train/val loss plot: could not load ANPE ({exc})")
+        return
+
+    summary = getattr(anpe, "summary", None)
+    if not isinstance(summary, dict):
+        print("    Skipping train/val loss plot: ANPE summary missing")
+        return
+
+    train_loss = summary.get("training_loss")
+    val_loss = summary.get("validation_loss")
+    if train_loss is None and val_loss is None:
+        print("    Skipping train/val loss plot: no loss history in ANPE summary")
+        return
+
+    plt.figure(figsize=(7, 5))
+    if train_loss is not None:
+        plt.plot(train_loss, label="train")
+    if val_loss is not None:
+        plt.plot(val_loss, label="val")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    fname = out_dir / "train_val_loss.png"
+    plt.tight_layout()
+    plt.savefig(fname, dpi=150)
+    plt.close()
+    print(f"    Saved: {fname}")
+
+
+def _plot_residuals_vs_snr(sx, n_test, out_dir):
+    if sx.mag is None or sx.stds_test is None or sx.means_test is None:
+        print("    Skipping residuals vs S/N: required arrays missing")
+        return
+
+    n_test_eff = min(n_test, len(sx.means_test), len(sx.theta), len(sx.mag))
+    if n_test_eff <= 0:
+        return
+
+    sigma_mag = sx.mag[:n_test_eff, :, 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        snr_bands = 1.0857362047581294 / sigma_mag
+    snr_bands[~np.isfinite(snr_bands)] = np.nan
+    snr_obj = np.nanmedian(snr_bands, axis=1)
+
+    n_theta = sx.means_test.shape[1]
+    for i in range(n_theta):
+        truth = sx.theta[:n_test_eff, i]
+        pred = sx.means_test[:n_test_eff, i]
+        resid = pred - truth
+        ok = np.isfinite(resid) & np.isfinite(snr_obj) & (snr_obj > 0)
+        if np.sum(ok) < 5:
+            continue
+
+        plt.figure(figsize=(6, 5))
+        plt.scatter(snr_obj[ok], resid[ok], s=10, alpha=0.5)
+        plt.xscale("log")
+        plt.axhline(0.0, color="r", linestyle="--", linewidth=1.0)
+        plt.xlabel("Median S/N per object")
+        plt.ylabel(f"Residual ({sx.labels[i]}: pred - true)")
+        plt.title(f"Residuals vs S/N: {sx.labels[i]}")
+        plt.grid(alpha=0.3)
+        fname = out_dir / f"residuals_vs_snr_{i}.png"
+        plt.tight_layout()
+        plt.savefig(fname, dpi=150)
+        plt.close()
+
+
+def _plot_posterior_width_vs_truth(sx, n_test, out_dir):
+    if sx.stds_test is None or sx.theta is None:
+        print("    Skipping posterior width plots: required arrays missing")
+        return
+
+    n_test_eff = min(n_test, len(sx.stds_test), len(sx.theta))
+    if n_test_eff <= 0:
+        return
+
+    n_theta = sx.stds_test.shape[1]
+    for i in range(n_theta):
+        truth = sx.theta[:n_test_eff, i]
+        width = sx.stds_test[:n_test_eff, i]
+        ok = np.isfinite(truth) & np.isfinite(width) & (width >= 0)
+        if np.sum(ok) < 5:
+            continue
+
+        plt.figure(figsize=(6, 5))
+        plt.scatter(truth[ok], width[ok], s=10, alpha=0.5)
+        plt.xlabel(f"True {sx.labels[i]}")
+        plt.ylabel("Posterior width (std)")
+        plt.title(f"Posterior width vs truth: {sx.labels[i]}")
+        plt.grid(alpha=0.3)
+        fname = out_dir / f"posterior_width_vs_truth_{i}.png"
+        plt.tight_layout()
+        plt.savefig(fname, dpi=150)
+        plt.close()
+
+
+def _plot_pp_and_sbc(posterior_test, theta_true, labels, out_dir):
+    if posterior_test is None:
+        print("    Skipping P-P/SBC: posterior samples not available")
+        return
+
+    n_test, n_samples, n_theta = posterior_test.shape
+    for i in range(n_theta):
+        samples = posterior_test[:, :, i]
+        truth = theta_true[:n_test, i][:, None]
+        cdf_vals = np.mean(samples <= truth, axis=1)
+        cdf_vals = cdf_vals[np.isfinite(cdf_vals)]
+        if len(cdf_vals) < 5:
+            continue
+
+        # P-P plot
+        q = np.linspace(0, 1, len(cdf_vals))
+        cdf_sorted = np.sort(cdf_vals)
+        plt.figure(figsize=(5.5, 5.5))
+        plt.plot(q, cdf_sorted, lw=2, label="Empirical")
+        plt.plot([0, 1], [0, 1], "k--", lw=1.2, label="Ideal")
+        plt.xlabel("Nominal quantile")
+        plt.ylabel("Empirical quantile")
+        plt.title(f"P-P plot: {labels[i]}")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        fname_pp = out_dir / f"pp_plot_{i}.png"
+        plt.tight_layout()
+        plt.savefig(fname_pp, dpi=150)
+        plt.close()
+
+        # SBC rank histogram
+        ranks = np.sum(samples < truth, axis=1)
+        bins = np.arange(n_samples + 2) - 0.5
+        plt.figure(figsize=(7, 4))
+        plt.hist(ranks, bins=bins, alpha=0.8, edgecolor="black")
+        expected = len(ranks) / (n_samples + 1)
+        plt.axhline(expected, color="r", linestyle="--", linewidth=1.2)
+        plt.xlabel("Rank")
+        plt.ylabel("Count")
+        plt.title(f"SBC rank histogram: {labels[i]}")
+        plt.grid(alpha=0.25)
+        fname_sbc = out_dir / f"sbc_rank_{i}.png"
+        plt.tight_layout()
+        plt.savefig(fname_sbc, dpi=150)
+        plt.close()
+
+
 def main():
     args = build_parser().parse_args()
 
@@ -99,7 +261,9 @@ def main():
     project_root = Path(__file__).resolve().parents[1]
     obs_dir = project_root / "obs" / "obs_properties"
     library_dir = project_root / "library"
+    logs_dir = project_root / "sbi-logs"
     library_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     np.random.seed(42)
 
@@ -223,7 +387,7 @@ def main():
     if args.target_params == "no_tau_met":
         drop_idx = [
             i for i, lab in enumerate(sx.labels)
-            if ("tau" in lab.lower()) or ("[m/h]" in lab.lower())
+            if _label_is_tau_or_metal(lab)
         ]
         if drop_idx:
             keep_idx = [i for i in range(sx.theta.shape[1]) if i not in drop_idx]
@@ -274,13 +438,16 @@ def main():
         device=args.device,
     )
 
+    if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:
+        posterior_test = posterior_test * theta_sigma[None, None, :] + theta_mu[None, None, :]
+        sx.means_test = np.median(posterior_test, axis=1)
+        sx.stds_test = np.std(posterior_test, axis=1)
+        sx.theta = sx.theta * theta_sigma[None, :] + theta_mu[None, :]
+
     print(f"Posterior test shape: {posterior_test.shape}")
 
     if not args.no_plot_test:
         from sbipix.plotting import plot_test_performance
-
-        logs_dir = project_root / "sbi-logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
 
         print("[6/6] Plotting test-performance diagnostics...")
         plot_test_performance(
@@ -289,6 +456,17 @@ def main():
             n_theta=sx.means_test.shape[1],
             save=True,
             name="euclid_quick_test_",
+        )
+
+        n_test_diag = min(posterior_test.shape[0], len(sx.means_test), len(sx.theta))
+        _plot_train_val_loss(sx, logs_dir)
+        _plot_residuals_vs_snr(sx, n_test_diag, logs_dir)
+        _plot_posterior_width_vs_truth(sx, n_test_diag, logs_dir)
+        _plot_pp_and_sbc(
+            posterior_test[:n_test_diag],
+            sx.theta[:n_test_diag],
+            sx.labels[:posterior_test.shape[-1]],
+            logs_dir,
         )
         print(f"Saved diagnostic plots in {logs_dir}")
 
