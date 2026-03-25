@@ -8,12 +8,12 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description="Quick SBIPIX Euclid smoke test (simulate + realism + optional train/test)"
     )
-    parser.add_argument("--n-sim", type=int, default=300,
-                        help="Number of simulations for quick run (default: 300)")
-    parser.add_argument("--epochs", type=int, default=5,
-                        help="Max epochs for quick training (default: 5)")
-    parser.add_argument("--n-test", type=int, default=10,
-                        help="Number of test samples for performance check (default: 10)")
+    parser.add_argument("--n-sim", type=int, default=50000,
+                        help="Number of simulations for run (default: 50000)")
+    parser.add_argument("--epochs", type=int, default=250,
+                        help="Max epochs for training (default: 250)")
+    parser.add_argument("--n-test", type=int, default=100,
+                        help="Number of test samples for performance check (default: 100)")
     parser.add_argument("--n-samples", type=int, default=100,
                         help="Posterior samples per test object (default: 100)")
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
@@ -51,6 +51,40 @@ def build_parser():
                         help="Sigma sampler distribution (default: lognormal)")
     parser.add_argument("--sigma-clip-max", type=float, default=0.8,
                         help="Clip sampled sigma above this mag threshold (default: 0.8)")
+    parser.add_argument("--fits-file", default="obs/obs_properties/COSMOS_DEEP.fits",
+                        help="Real COSMOS-Deep FITS file for mock matching")
+    parser.add_argument("--patch-id", type=int, default=98,
+                        help="Patch ID for real data matching (default: 98)")
+    parser.add_argument("--mock-match", choices=["none", "vis1d", "vis_color2d"], default="vis1d",
+                        help="Optional real-data matching for training mocks (default: vis1d)")
+    parser.add_argument("--mock-match-band", default="VIS",
+                        help="Band used for mock matching (default: VIS)")
+    parser.add_argument("--mock-match-color-band", default="NISP-Y",
+                        help="Color reference band for vis_color2d mode (default: NISP-Y)")
+    parser.add_argument("--mock-match-bins", type=int, default=24,
+                        help="Number of bins for mock matching histograms (default: 24)")
+    parser.add_argument("--target-params", choices=["all", "no_tau_met"], default="no_tau_met",
+                        help="Target parameter set for training (default: no_tau_met)")
+    parser.add_argument("--theta-normalization", choices=["none", "zscore"], default="zscore",
+                        help="Normalization for target parameters before training (default: zscore)")
+    parser.add_argument("--sfr-floor", type=float, default=-5.0,
+                        help="Lower clip for log(SFR) (default: -5)")
+    parser.add_argument("--sfr-ceil", type=float, default=3.0,
+                        help="Upper clip for log(SFR) (default: 3)")
+    parser.add_argument("--max-train-samples", type=int, default=50000,
+                        help="Maximum samples used for training (default: 50000)")
+    parser.add_argument("--mass-min", type=float, default=6.0,
+                        help="Simulation prior lower bound for stellar mass")
+    parser.add_argument("--mass-max", type=float, default=11.5,
+                        help="Simulation prior upper bound for stellar mass")
+    parser.add_argument("--z-min", type=float, default=0.1,
+                        help="Simulation prior lower bound for redshift")
+    parser.add_argument("--z-max", type=float, default=3.0,
+                        help="Simulation prior upper bound for redshift")
+    parser.add_argument("--Av-min", type=float, default=0.0,
+                        help="Simulation prior lower bound for dust Av")
+    parser.add_argument("--Av-max", type=float, default=2.5,
+                        help="Simulation prior upper bound for dust Av")
     return parser
 
 
@@ -116,17 +150,17 @@ def main():
     else:
         print("[1/5] Simulating galaxy SEDs...")
         sx.simulate(
-            mass_min=6.0,
-            mass_max=11.5,
+            mass_min=args.mass_min,
+            mass_max=args.mass_max,
             z_prior="flat",
-            z_min=0.1,
-            z_max=3.0,
+            z_min=args.z_min,
+            z_max=args.z_max,
             Z_min=-1.7,
             Z_max=0.3,
             dust_model="Calzetti",
             dust_prior="flat",
-            Av_min=0.0,
-            Av_max=2.5,
+            Av_min=args.Av_min,
+            Av_max=args.Av_max,
         )
 
     print("[2/5] Loading simulation...")
@@ -143,19 +177,79 @@ def main():
     sx.n_simulation = len(sx.theta)
     print(f"    Kept {sx.n_simulation} valid simulations after cleaning")
 
+    # Optional training-side mock matching against real observations
+    if args.mock_match != "none":
+        from validate_noise_model import load_real_data, get_mock_arrays, compute_mock_match_weights
+
+        real_data = load_real_data(args.fits_file, patch_id=args.patch_id, aperture=args.aperture)
+        mock_data = get_mock_arrays(sx)
+        mock_weights, match_msg = compute_mock_match_weights(
+            real_data,
+            mock_data,
+            mode=args.mock_match,
+            match_band=args.mock_match_band,
+            color_band=args.mock_match_color_band,
+            n_bins=args.mock_match_bins,
+        )
+        valid = np.isfinite(mock_weights) & (mock_weights > 0)
+        if np.any(valid):
+            probs = mock_weights[valid] / mock_weights[valid].sum()
+            source_idx = np.where(valid)[0]
+            rng = np.random.default_rng(0)
+            draw_idx = rng.choice(source_idx, size=sx.n_simulation, replace=True, p=probs)
+            sx.theta = sx.theta[draw_idx, :]
+            sx.mag = sx.mag[draw_idx, :, :]
+            sx.obs = sx.obs[draw_idx, :]
+            eff_n = (mock_weights[valid].sum() ** 2) / np.sum(mock_weights[valid] ** 2)
+            print(f"    {match_msg}")
+            print(f"    Applied weighted resampling for training (effective N ≈ {eff_n:.0f})")
+        else:
+            print("    Mock matching requested, but all weights were zero. Keeping unweighted mocks.")
+
+    # Clip pathological SFR tails
+    sfr_idx = next((i for i, lab in enumerate(sx.labels) if "SFR" in lab), None)
+    if sfr_idx is not None:
+        before = sx.theta[:, sfr_idx].copy()
+        sx.theta[:, sfr_idx] = np.clip(sx.theta[:, sfr_idx], args.sfr_floor, args.sfr_ceil)
+        clipped = np.sum(before != sx.theta[:, sfr_idx])
+        print(f"    Clipped SFR at [{args.sfr_floor}, {args.sfr_ceil}] for {clipped}/{len(before)} samples")
+
+    # Temporarily drop tau and metallicity from inference targets
+    if args.target_params == "no_tau_met":
+        drop_idx = [
+            i for i, lab in enumerate(sx.labels)
+            if ("tau" in lab.lower()) or ("[m/h]" in lab.lower())
+        ]
+        if drop_idx:
+            keep_idx = [i for i in range(sx.theta.shape[1]) if i not in drop_idx]
+            dropped_labels = [sx.labels[i] for i in drop_idx]
+            sx.theta = sx.theta[:, keep_idx]
+            sx.labels = [sx.labels[i] for i in keep_idx]
+            print(f"    Dropped target parameters: {', '.join(dropped_labels)}")
+
+    theta_mu = None
+    theta_sigma = None
+    if args.theta_normalization == "zscore":
+        theta_mu = np.mean(sx.theta, axis=0)
+        theta_sigma = np.std(sx.theta, axis=0)
+        theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
+        sx.theta = (sx.theta - theta_mu) / theta_sigma
+        print("    Applied z-score normalization to training targets")
+
     if args.skip_train:
         print("Done: quick Euclid preparation finished (simulation + realism).")
         print("Run without --skip-train to continue to training/testing.")
         return
 
     print("[4/5] Training quick model...")
-    min_thetas = np.min(sx.theta, axis=0)
-    max_thetas = np.max(sx.theta, axis=0)
+    n_train = len(sx.theta) if args.max_train_samples <= 0 else min(args.max_train_samples, len(sx.theta))
+    min_thetas = np.min(sx.theta[:n_train], axis=0)
+    max_thetas = np.max(sx.theta[:n_train], axis=0)
 
     sx.train(
         min_thetas=min_thetas,
         max_thetas=max_thetas,
-        n_max=len(sx.theta),
+        n_max=n_train,
         epochs_max=args.epochs,
         nblocks=3,
         nhidden=64,
@@ -174,6 +268,16 @@ def main():
         return_posterior=True,
         device=args.device,
     )
+
+    if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:
+        pred_dim = posterior_test.shape[-1]
+        posterior_test = posterior_test * theta_sigma[:pred_dim] + theta_mu[:pred_dim]
+        sx.means_test = np.median(posterior_test, axis=1)
+        sx.stds_test = np.std(posterior_test, axis=1)
+        sx.theta[:, :pred_dim] = sx.theta[:, :pred_dim] * theta_sigma[:pred_dim] + theta_mu[:pred_dim]
+        if pred_dim < sx.theta.shape[1]:
+            sx.theta[:, pred_dim:] = sx.theta[:, pred_dim:] * theta_sigma[pred_dim:] + theta_mu[pred_dim:]
+
     print(f"Posterior test shape: {posterior_test.shape}")
 
     if not args.no_plot_test:
@@ -186,6 +290,7 @@ def main():
         plot_test_performance(
             sx,
             n_test=min(posterior_test.shape[0], len(sx.means_test)),
+            n_theta=sx.means_test.shape[1],
             save=True,
             name="euclid_quick_test_",
         )
