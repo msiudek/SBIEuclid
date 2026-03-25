@@ -539,6 +539,11 @@ def build_parser():
     p.add_argument("--aperture", default="3fwhm",
                    choices=["2fwhm", "3fwhm"],
                    help="Aperture to use for real data comparison (default: 3fwhm)")
+    p.add_argument("--noise-prefix", default="north_3fwhm",
+                   choices=["north_2fwhm", "north_3fwhm"],
+                   help="Noise-product prefix to use from obs_properties (default: north_3fwhm)")
+    p.add_argument("--limits-file", default=None,
+                   help="Optional custom limits file in obs_properties (e.g. background_noise_north_2fwhm_5sigma.npy)")
     p.add_argument("--n-sim", type=int, default=10000,
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
     p.add_argument("--outdir", default="sbi-logs/validate",
@@ -553,6 +558,16 @@ def build_parser():
                    help="Distribution used to sample sigma values (default: truncnorm)")
     p.add_argument("--sigma-clip-max", type=float, default=1.0,
                    help="Clip sampled sigma values above this threshold in mag (default: 1.0)")
+    p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="depth_corrected",
+                   help="Noise model: classic sigma(mag) or depth-corrected flux model (default: depth_corrected)")
+    p.add_argument("--depth-nsigma", type=float, default=1.0,
+                   help="Interpret input depth as N-sigma when using depth_corrected (1.0 if limits are 1σ, 5.0 for 5σ)")
+    p.add_argument("--corr-clip-min", type=float, default=0.2,
+                   help="Minimum correction factor C(m) for depth_corrected mode")
+    p.add_argument("--corr-clip-max", type=float, default=5.0,
+                   help="Maximum correction factor C(m) for depth_corrected mode")
+    p.add_argument("--corr-scatter-log", type=float, default=0.0,
+                   help="Optional log-space scatter on C(m); e.g. 0.1 gives mild stochastic spread")
     p.add_argument("--selection-band", choices=FILTER_SHORT, default=None,
                    help="Optional observed-band selection for real and mock catalogs")
     p.add_argument("--mag-min", type=float, default=None,
@@ -590,14 +605,16 @@ def main():
     import numpy as np
 
     sx = sbipix()
+    prefix = args.noise_prefix
+    limits_file = args.limits_file if args.limits_file is not None else f"background_noise_{prefix}.npy"
     sx.configure_filters(
         filter_list="filters_to_use.dat",
         filter_path=str(obs_dir),
-        mean_sigma_file="mean_sigma_north_3fwhm.npy",
-        std_sigma_file="std_sigma_north_3fwhm.npy",
-        percentiles_file="percentiles_north_3fwhm.npy",
-        limits_file="background_noise_north_3fwhm.npy",
-        lam_eff_file="lam_eff_north_3fwhm.npy",
+        mean_sigma_file=f"mean_sigma_{prefix}.npy",
+        std_sigma_file=f"std_sigma_{prefix}.npy",
+        percentiles_file=f"percentiles_{prefix}.npy",
+        limits_file=limits_file,
+        lam_eff_file=f"lam_eff_{prefix}.npy",
     )
     sx.atlas_path = str(library_dir) + "/"
     sx.model_path = str(library_dir) + "/"
@@ -615,13 +632,24 @@ def main():
         smooth_bins=args.smooth_bins,
         sigma_sampler=args.sigma_sampler,
         sigma_clip_max=args.sigma_clip_max,
+        noise_model=args.noise_model,
+        depth_nsigma=args.depth_nsigma,
+        corr_clip_min=args.corr_clip_min,
+        corr_clip_max=args.corr_clip_max,
+        corr_scatter_log=args.corr_scatter_log,
     )
 
     print("Noise-model settings:")
+    print(f"  mode           = {sx.noise_model}")
+    print(f"  noise prefix   = {prefix}")
+    print(f"  limits file    = {limits_file}")
+    print(f"  depth nsigma   = {sx.noise_depth_nsigma}")
     print(f"  std scale      = {sx.noise_std_scale}")
     print(f"  smooth bins    = {sx.noise_bin_interpolation}")
     print(f"  sigma sampler  = {sx.noise_sigma_sampler}")
     print(f"  sigma clip max = {sx.noise_sigma_clip_max}")
+    print(f"  corr clip      = [{sx.noise_corr_clip_min}, {sx.noise_corr_clip_max}]")
+    print(f"  corr scatter   = {sx.noise_corr_scatter_log}")
 
     np.random.seed(0)
 
