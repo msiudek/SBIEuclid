@@ -24,6 +24,28 @@ def build_parser():
                         help="Skip performance test after training")
     parser.add_argument("--no-plot-test", action="store_true",
                         help="Skip the test-performance diagnostic plots")
+    # Noise configuration options
+    parser.add_argument("--noise-prefix", default="north_2fwhm",
+                        choices=["north_2fwhm", "north_3fwhm"],
+                        help="Noise prefix / aperture config (default: north_2fwhm)")
+    parser.add_argument("--aperture", default="2fwhm",
+                        choices=["2fwhm", "3fwhm"],
+                        help="Aperture size (default: 2fwhm)")
+    parser.add_argument("--noise-model", default="sigma_mag",
+                        choices=["sigma_mag", "depth_corrected"],
+                        help="Noise model: sigma(mag) or depth-corrected (default: sigma_mag)")
+    parser.add_argument("--std-scale", type=float, default=1.2,
+                        help="Standard deviation scale factor (default: 1.2)")
+    parser.add_argument("--smooth-bins", action="store_true", default=True,
+                        help="Interpolate sigma statistics between bins (default: True)")
+    parser.add_argument("--detection-model", default="probabilistic",
+                        choices=["hard", "probabilistic"],
+                        help="Detection model (default: probabilistic)")
+    parser.add_argument("--sigma-sampler", default="lognormal",
+                        choices=["truncnorm", "lognormal"],
+                        help="Sigma sampler distribution (default: lognormal)")
+    parser.add_argument("--sigma-clip-max", type=float, default=0.8,
+                        help="Clip sampled sigma above this mag threshold (default: 0.8)")
     return parser
 
 
@@ -47,17 +69,17 @@ def main():
     sx.configure_filters(
         filter_list="filters_to_use.dat",
         filter_path=str(obs_dir),
-        mean_sigma_file="mean_sigma_north_3fwhm.npy",
-        std_sigma_file="std_sigma_north_3fwhm.npy",
-        percentiles_file="percentiles_north_3fwhm.npy",
-        limits_file="background_noise_north_3fwhm.npy",
-        lam_eff_file="lam_eff_north_3fwhm.npy",
+        mean_sigma_file=f"mean_sigma_{args.noise_prefix}.npy",
+        std_sigma_file=f"std_sigma_{args.noise_prefix}.npy",
+        percentiles_file=f"percentiles_{args.noise_prefix}.npy",
+        limits_file=f"background_noise_{args.noise_prefix}.npy",
+        lam_eff_file=f"lam_eff_{args.noise_prefix}.npy",
     )
 
     sx.atlas_path = str(library_dir) + "/"
     sx.model_path = str(library_dir) + "/"
-    sx.atlas_name = "atlas_obs_euclid_north_quick"
-    sx.model_name = "post_obs_euclid_north_quick.pkl"
+    sx.atlas_name = f"atlas_obs_euclid_{args.noise_prefix}_quick"
+    sx.model_name = f"post_obs_euclid_{args.noise_prefix}_quick.pkl"
 
     sx.n_simulation = args.n_sim
     sx.parametric = True
@@ -67,6 +89,21 @@ def main():
     sx.include_limit = True
     sx.condition_sigma = True
     sx.include_sigma = True
+
+    # Configure noise model with optimal parameters
+    sx.configure_noise_model(
+        noise_model=args.noise_model,
+        std_scale=args.std_scale,
+        smooth_bins=args.smooth_bins,
+        sigma_sampler=args.sigma_sampler,
+        sigma_clip_max=args.sigma_clip_max,
+        detection_model=args.detection_model,
+    )
+
+    print(f"[0/5] Configuration: {args.noise_prefix}, aperture={args.aperture}, "
+          f"noise_model={args.noise_model}, std_scale={args.std_scale}, "
+          f"detection={args.detection_model}, sampler={args.sigma_sampler}")
+    print()
 
     print("[1/5] Simulating galaxy SEDs...")
     sx.simulate(
