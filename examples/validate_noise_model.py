@@ -662,8 +662,8 @@ def build_parser():
                    help="Interpolate sigma statistics between bins instead of hard digitize")
     p.add_argument("--sigma-sampler", choices=["truncnorm", "lognormal"], default="truncnorm",
                    help="Distribution used to sample sigma values (default: truncnorm)")
-    p.add_argument("--sigma-clip-max", type=float, default=1.0,
-                   help="Clip sampled sigma values above this threshold in mag (default: 1.0)")
+    p.add_argument("--sigma-clip-max", type=float, default=0.8,
+                   help="Clip sampled sigma values above this threshold in mag (default: 0.8)")
     p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="sigma_mag",
                    help="Noise model: classic sigma(mag) or depth-corrected flux model (default: sigma_mag)")
     p.add_argument("--depth-nsigma", type=float, default=1.0,
