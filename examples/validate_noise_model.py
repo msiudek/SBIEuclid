@@ -108,6 +108,112 @@ def slice_filter_major(data, mask):
     return out
 
 
+def take_filter_major(data, indices):
+    """Take a list of object indices across all filter-major arrays in a dict."""
+    out = {}
+    for key, value in data.items():
+        if isinstance(value, np.ndarray) and value.ndim == 2:
+            out[key] = value[:, indices]
+        else:
+            out[key] = value
+    return out
+
+
+def _ratio_weights(real_hist, mock_hist):
+    """Return histogram-ratio weights using normalized frequencies."""
+    real_hist = np.asarray(real_hist, dtype=float)
+    mock_hist = np.asarray(mock_hist, dtype=float)
+    real_total = real_hist.sum()
+    mock_total = mock_hist.sum()
+    if real_total <= 0 or mock_total <= 0:
+        return np.zeros_like(mock_hist, dtype=float)
+    real_pdf = real_hist / real_total
+    mock_pdf = mock_hist / mock_total
+    weights = np.zeros_like(mock_pdf, dtype=float)
+    valid = mock_pdf > 0
+    weights[valid] = real_pdf[valid] / mock_pdf[valid]
+    return weights
+
+
+def compute_mock_match_weights(real_data, mock_data, mode="vis1d", match_band="VIS",
+                               color_band="NISP-Y", n_bins=24):
+    """Compute per-mock-object weights that match real observed distributions."""
+    n_mock = mock_data["mag"].shape[1]
+    weights = np.ones(n_mock, dtype=float)
+
+    if mode == "none":
+        return weights, "mock matching disabled"
+
+    band_idx = band_to_index(match_band)
+    real_band = real_data["mag"][band_idx]
+    mock_band = mock_data["mag"][band_idx]
+    real_band_ok = np.isfinite(real_band)
+    mock_band_ok = np.isfinite(mock_band) & (mock_band < NONDET_MAG - 0.5)
+
+    bins_mag = np.linspace(MAG_BRIGHT, MAG_FAINT, n_bins + 1)
+
+    if mode == "vis1d":
+        real_hist, _ = np.histogram(real_band[real_band_ok], bins=bins_mag)
+        mock_hist, _ = np.histogram(mock_band[mock_band_ok], bins=bins_mag)
+        bin_weights = _ratio_weights(real_hist, mock_hist)
+        bin_idx = np.digitize(mock_band, bins_mag) - 1
+        in_range = mock_band_ok & (bin_idx >= 0) & (bin_idx < len(bin_weights))
+        weights[:] = 0.0
+        weights[in_range] = bin_weights[bin_idx[in_range]]
+        return weights, (
+            f"mock matching: 1D {match_band} histogram with {n_bins} bins "
+            f"(real n={real_band_ok.sum()}, mock detected n={mock_band_ok.sum()})"
+        )
+
+    if mode == "vis_color2d":
+        color_idx = band_to_index(color_band)
+        real_color_ok = np.isfinite(real_data["mag"][color_idx])
+        mock_color_ok = np.isfinite(mock_data["mag"][color_idx]) & (mock_data["mag"][color_idx] < NONDET_MAG - 0.5)
+        real_ok = real_band_ok & real_color_ok
+        mock_ok = mock_band_ok & mock_color_ok
+
+        real_color = real_data["mag"][band_idx][real_ok] - real_data["mag"][color_idx][real_ok]
+        mock_color = mock_data["mag"][band_idx][mock_ok] - mock_data["mag"][color_idx][mock_ok]
+        color_all = np.concatenate([real_color, mock_color]) if real_color.size and mock_color.size else np.array([-2.0, 4.0])
+        color_lo = np.nanpercentile(color_all, 1) if color_all.size > 0 else -2.0
+        color_hi = np.nanpercentile(color_all, 99) if color_all.size > 0 else 4.0
+        if not np.isfinite(color_lo) or not np.isfinite(color_hi) or color_hi <= color_lo:
+            color_lo, color_hi = -2.0, 4.0
+        bins_color = np.linspace(color_lo, color_hi, n_bins + 1)
+
+        real_hist, _, _ = np.histogram2d(real_data["mag"][band_idx][real_ok], real_color, bins=(bins_mag, bins_color))
+        mock_hist, _, _ = np.histogram2d(mock_data["mag"][band_idx][mock_ok], mock_color, bins=(bins_mag, bins_color))
+        cell_weights = _ratio_weights(real_hist, mock_hist)
+
+        weights[:] = 0.0
+        mock_color_full = mock_data["mag"][band_idx] - mock_data["mag"][color_idx]
+        x_idx = np.digitize(mock_data["mag"][band_idx], bins_mag) - 1
+        y_idx = np.digitize(mock_color_full, bins_color) - 1
+        in_range = mock_ok & (x_idx >= 0) & (x_idx < cell_weights.shape[0]) & (y_idx >= 0) & (y_idx < cell_weights.shape[1])
+        weights[in_range] = cell_weights[x_idx[in_range], y_idx[in_range]]
+        return weights, (
+            f"mock matching: 2D ({match_band}, {match_band}-{color_band}) with {n_bins}x{n_bins} bins "
+            f"(real n={real_ok.sum()}, mock detected n={mock_ok.sum()})"
+        )
+
+    raise ValueError(f"Unknown mock-match mode: {mode}")
+
+
+def resample_mock_catalogue(mock_data, weights, seed=0):
+    """Approximate reweighting by deterministic bootstrap resampling with replacement."""
+    weights = np.asarray(weights, dtype=float)
+    valid = np.isfinite(weights) & (weights > 0)
+    if not np.any(valid):
+        return mock_data, "mock matching skipped: all weights are zero"
+
+    probs = weights[valid] / weights[valid].sum()
+    source_idx = np.where(valid)[0]
+    rng = np.random.default_rng(seed)
+    draw_idx = rng.choice(source_idx, size=mock_data["mag"].shape[1], replace=True, p=probs)
+    eff_n = (weights[valid].sum() ** 2) / np.sum(weights[valid] ** 2)
+    return take_filter_major(mock_data, draw_idx), f"resampled weighted mock catalogue (effective N ≈ {eff_n:.0f})"
+
+
 def compute_detection_fraction(x, detected, bins, min_count=25):
     """Compute detection fraction in bins of x."""
     total = np.histogram(x, bins=bins)[0].astype(float)
@@ -550,18 +656,24 @@ def build_parser():
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", action="store_true",
                    help="Skip simulation step; load existing atlas instead")
-    p.add_argument("--std-scale", type=float, default=1.15,
-                   help="Multiply sigma std by this factor before sampling (default: 1.15)")
+    p.add_argument("--std-scale", type=float, default=1.2,
+                   help="Multiply sigma std by this factor before sampling (default: 1.2)")
     p.add_argument("--smooth-bins", action="store_true",
                    help="Interpolate sigma statistics between bins instead of hard digitize")
     p.add_argument("--sigma-sampler", choices=["truncnorm", "lognormal"], default="truncnorm",
                    help="Distribution used to sample sigma values (default: truncnorm)")
     p.add_argument("--sigma-clip-max", type=float, default=1.0,
                    help="Clip sampled sigma values above this threshold in mag (default: 1.0)")
-    p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="depth_corrected",
-                   help="Noise model: classic sigma(mag) or depth-corrected flux model (default: depth_corrected)")
+    p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="sigma_mag",
+                   help="Noise model: classic sigma(mag) or depth-corrected flux model (default: sigma_mag)")
     p.add_argument("--depth-nsigma", type=float, default=1.0,
                    help="Interpret input depth as N-sigma when using depth_corrected (1.0 if limits are 1σ, 5.0 for 5σ)")
+    p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
+                   help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
+    p.add_argument("--detection-snr-offset", type=float, default=0.0,
+                   help="Offset from the nominal limit where P(detect)=0.5 in S/N units (default: 0.0)")
+    p.add_argument("--detection-snr-width", type=float, default=1.0,
+                   help="Width of the tanh detection transition in S/N units (default: 1.0)")
     p.add_argument("--corr-clip-min", type=float, default=0.2,
                    help="Minimum correction factor C(m) for depth_corrected mode")
     p.add_argument("--corr-clip-max", type=float, default=5.0,
@@ -569,11 +681,19 @@ def build_parser():
     p.add_argument("--corr-scatter-log", type=float, default=0.0,
                    help="Optional log-space scatter on C(m); e.g. 0.1 gives mild stochastic spread")
     p.add_argument("--selection-band", choices=FILTER_SHORT, default=None,
-                   help="Optional observed-band selection for real and mock catalogs")
+                   help="Optional hard observed-band cut for real and mock catalogs")
     p.add_argument("--mag-min", type=float, default=None,
                    help="Optional lower magnitude cut in the selection band")
     p.add_argument("--mag-max", type=float, default=None,
                    help="Optional upper magnitude cut in the selection band")
+    p.add_argument("--mock-match", choices=["none", "vis1d", "vis_color2d"], default="vis1d",
+                   help="Reweight/resample mocks to match real observed distributions instead of only hard-cutting (default: vis1d)")
+    p.add_argument("--mock-match-band", choices=FILTER_SHORT, default="VIS",
+                   help="Observed band used for mock reweighting (default: VIS)")
+    p.add_argument("--mock-match-color-band", choices=FILTER_SHORT, default="NISP-Y",
+                   help="Second band for 2D color matching; color is band minus this band (default: NISP-Y)")
+    p.add_argument("--mock-match-bins", type=int, default=24,
+                   help="Number of bins per axis for mock matching (default: 24)")
     return p
 
 
@@ -634,6 +754,9 @@ def main():
         sigma_clip_max=args.sigma_clip_max,
         noise_model=args.noise_model,
         depth_nsigma=args.depth_nsigma,
+        detection_model=args.detection_model,
+        detection_snr_offset=args.detection_snr_offset,
+        detection_snr_width=args.detection_snr_width,
         corr_clip_min=args.corr_clip_min,
         corr_clip_max=args.corr_clip_max,
         corr_scatter_log=args.corr_scatter_log,
@@ -648,6 +771,9 @@ def main():
     print(f"  smooth bins    = {sx.noise_bin_interpolation}")
     print(f"  sigma sampler  = {sx.noise_sigma_sampler}")
     print(f"  sigma clip max = {sx.noise_sigma_clip_max}")
+    print(f"  detect model   = {sx.noise_detection_model}")
+    print(f"  detect offset  = {sx.noise_detection_snr_offset}")
+    print(f"  detect width   = {sx.noise_detection_snr_width}")
     print(f"  corr clip      = [{sx.noise_corr_clip_min}, {sx.noise_corr_clip_max}]")
     print(f"  corr scatter   = {sx.noise_corr_scatter_log}")
 
@@ -712,6 +838,23 @@ def main():
 
         real_data = slice_filter_major(real_data, real_mask)
         mock_data = slice_filter_major(mock_data, mock_mask)
+
+    # ------------------------------------------------------------------
+    # Optional mock reweighting/resampling to match the real observed prior
+    # ------------------------------------------------------------------
+    if args.mock_match != "none":
+        mock_weights, match_msg = compute_mock_match_weights(
+            real_data,
+            mock_data,
+            mode=args.mock_match,
+            match_band=args.mock_match_band,
+            color_band=args.mock_match_color_band,
+            n_bins=args.mock_match_bins,
+        )
+        print(match_msg)
+        print(f"  non-zero weights: {(mock_weights > 0).sum()} / {mock_weights.size}")
+        mock_data, resample_msg = resample_mock_catalogue(mock_data, mock_weights, seed=0)
+        print(f"  {resample_msg}")
 
     # ------------------------------------------------------------------
     # Generate plots
