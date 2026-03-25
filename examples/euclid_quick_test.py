@@ -83,7 +83,7 @@ def build_parser():
                         help="Simulation prior upper bound for redshift")
     parser.add_argument("--Av-min", type=float, default=0.0,
                         help="Simulation prior lower bound for dust Av")
-    parser.add_argument("--Av-max", type=float, default=2.5,
+    parser.add_argument("--Av-max", type=float, default=2.0,
                         help="Simulation prior upper bound for dust Av")
     return parser
 
@@ -177,6 +177,11 @@ def main():
     sx.n_simulation = len(sx.theta)
     print(f"    Kept {sx.n_simulation} valid simulations after cleaning")
 
+    theta_stats = {
+        label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
+        for i, label in enumerate(sx.labels)
+    }
+
     # Optional training-side mock matching against real observations
     if args.mock_match != "none":
         from validate_noise_model import load_real_data, get_mock_arrays, compute_mock_match_weights
@@ -230,11 +235,11 @@ def main():
     theta_mu = None
     theta_sigma = None
     if args.theta_normalization == "zscore":
-        theta_mu = np.mean(sx.theta, axis=0)
-        theta_sigma = np.std(sx.theta, axis=0)
+        theta_mu = np.array([theta_stats[label][0] for label in sx.labels], dtype=float)
+        theta_sigma = np.array([theta_stats[label][1] for label in sx.labels], dtype=float)
         theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
         sx.theta = (sx.theta - theta_mu) / theta_sigma
-        print("    Applied z-score normalization to training targets")
+        print("    Applied z-score normalization to training targets (stats from pre-match distribution)")
 
     if args.skip_train:
         print("Done: quick Euclid preparation finished (simulation + realism).")
@@ -268,15 +273,6 @@ def main():
         return_posterior=True,
         device=args.device,
     )
-
-    if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:
-        pred_dim = posterior_test.shape[-1]
-        posterior_test = posterior_test * theta_sigma[:pred_dim] + theta_mu[:pred_dim]
-        sx.means_test = np.median(posterior_test, axis=1)
-        sx.stds_test = np.std(posterior_test, axis=1)
-        sx.theta[:, :pred_dim] = sx.theta[:, :pred_dim] * theta_sigma[:pred_dim] + theta_mu[:pred_dim]
-        if pred_dim < sx.theta.shape[1]:
-            sx.theta[:, pred_dim:] = sx.theta[:, pred_dim:] * theta_sigma[pred_dim:] + theta_mu[pred_dim:]
 
     print(f"Posterior test shape: {posterior_test.shape}")
 
