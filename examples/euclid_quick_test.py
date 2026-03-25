@@ -24,6 +24,11 @@ def build_parser():
                         help="Skip performance test after training")
     parser.add_argument("--no-plot-test", action="store_true",
                         help="Skip the test-performance diagnostic plots")
+    parser.add_argument("--skip-simulate", action="store_true",
+                        help="Skip simulation and realism; load existing atlas directly")
+    parser.add_argument("--atlas-name", default=None,
+                        help="Override atlas name (default: auto-generated from noise-prefix). "
+                             "Use to point to an existing atlas, e.g. atlas_obs_euclid_north_2fwhm_validate_10000")
     # Noise configuration options
     parser.add_argument("--noise-prefix", default="north_2fwhm",
                         choices=["north_2fwhm", "north_3fwhm"],
@@ -78,7 +83,7 @@ def main():
 
     sx.atlas_path = str(library_dir) + "/"
     sx.model_path = str(library_dir) + "/"
-    sx.atlas_name = f"atlas_obs_euclid_{args.noise_prefix}_quick"
+    sx.atlas_name = args.atlas_name if args.atlas_name else f"atlas_obs_euclid_{args.noise_prefix}_quick"
     sx.model_name = f"post_obs_euclid_{args.noise_prefix}_quick.pkl"
 
     sx.n_simulation = args.n_sim
@@ -103,22 +108,26 @@ def main():
     print(f"[0/5] Configuration: {args.noise_prefix}, aperture={args.aperture}, "
           f"noise_model={args.noise_model}, std_scale={args.std_scale}, "
           f"detection={args.detection_model}, sampler={args.sigma_sampler}")
+    print(f"      atlas: {sx.atlas_name}{' (reusing existing)' if args.skip_simulate else ''}")
     print()
 
-    print("[1/5] Simulating galaxy SEDs...")
-    sx.simulate(
-        mass_min=6.0,
-        mass_max=11.5,
-        z_prior="flat",
-        z_min=0.1,
-        z_max=3.0,
-        Z_min=-1.7,
-        Z_max=0.3,
-        dust_model="Calzetti",
-        dust_prior="flat",
-        Av_min=0.0,
-        Av_max=2.5,
-    )
+    if args.skip_simulate:
+        print("[1/5] Skipping simulation — loading existing atlas...")
+    else:
+        print("[1/5] Simulating galaxy SEDs...")
+        sx.simulate(
+            mass_min=6.0,
+            mass_max=11.5,
+            z_prior="flat",
+            z_min=0.1,
+            z_max=3.0,
+            Z_min=-1.7,
+            Z_max=0.3,
+            dust_model="Calzetti",
+            dust_prior="flat",
+            Av_min=0.0,
+            Av_max=2.5,
+        )
 
     print("[2/5] Loading simulation...")
     sx.load_simulation()
