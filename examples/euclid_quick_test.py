@@ -400,11 +400,13 @@ def main():
 
     theta_mu = None
     theta_sigma = None
+    n_theta_target = sx.theta.shape[1] if sx.infer_z else sx.theta.shape[1] - 1
     if args.theta_normalization == "zscore":
-        theta_mu = np.array([theta_stats[label][0] for label in sx.labels], dtype=float)
-        theta_sigma = np.array([theta_stats[label][1] for label in sx.labels], dtype=float)
+        target_labels = sx.labels[:n_theta_target]
+        theta_mu = np.array([theta_stats[label][0] for label in target_labels], dtype=float)
+        theta_sigma = np.array([theta_stats[label][1] for label in target_labels], dtype=float)
         theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
-        sx.theta = (sx.theta - theta_mu) / theta_sigma
+        sx.theta[:, :n_theta_target] = (sx.theta[:, :n_theta_target] - theta_mu) / theta_sigma
         print("    Applied z-score normalization to training targets (stats from pre-match distribution)")
 
     if args.skip_train:
@@ -444,7 +446,7 @@ def main():
         posterior_test = posterior_test * theta_sigma[None, None, :] + theta_mu[None, None, :]
         sx.means_test = np.median(posterior_test, axis=1)
         sx.stds_test = np.std(posterior_test, axis=1)
-        sx.theta = sx.theta * theta_sigma[None, :] + theta_mu[None, :]
+        sx.theta[:, :n_theta_target] = sx.theta[:, :n_theta_target] * theta_sigma[None, :] + theta_mu[None, :]
 
     print(f"Posterior test shape: {posterior_test.shape}")
 
