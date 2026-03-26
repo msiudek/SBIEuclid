@@ -92,6 +92,8 @@ def build_parser():
                         help="Simulation prior lower bound for dust Av")
     parser.add_argument("--Av-max", type=float, default=2.0,
                         help="Simulation prior upper bound for dust Av")
+    parser.add_argument("--run-name", default=None,
+                        help="If set, saves logs and plots into sbi-logs/<run-name>/ subdirectory")
     return parser
 
 
@@ -270,6 +272,8 @@ def main():
     obs_dir = project_root / "obs" / "obs_properties"
     library_dir = project_root / "library"
     logs_dir = project_root / "sbi-logs"
+    if args.run_name:
+        logs_dir = logs_dir / args.run_name
     library_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
