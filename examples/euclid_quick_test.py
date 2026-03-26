@@ -58,16 +58,16 @@ def build_parser():
                         help="Real COSMOS-Deep FITS file for mock matching")
     parser.add_argument("--patch-id", type=int, default=98,
                         help="Patch ID for real data matching (default: 98)")
-    parser.add_argument("--mock-match", choices=["none", "vis1d", "vis_color2d"], default="vis1d",
-                        help="Optional real-data matching for training mocks (default: vis1d)")
+    parser.add_argument("--mock-match", choices=["none", "vis1d", "vis_color2d"], default="none",
+                        help="Optional real-data matching for training mocks (default: none)")
     parser.add_argument("--mock-match-band", default="VIS",
                         help="Band used for mock matching (default: VIS)")
     parser.add_argument("--mock-match-color-band", default="NISP-Y",
                         help="Color reference band for vis_color2d mode (default: NISP-Y)")
     parser.add_argument("--mock-match-bins", type=int, default=24,
                         help="Number of bins for mock matching histograms (default: 24)")
-    parser.add_argument("--mock-match-alpha", type=float, default=0.9,
-                        help="Smoothing factor for mock-match weights: probs = alpha*w + (1-alpha)/N (default: 0.9)")
+    parser.add_argument("--mock-match-alpha", type=float, default=0.7,
+                        help="Smoothing factor for mock-match weights: probs = alpha*w + (1-alpha)/N (default: 0.7)")
     parser.add_argument("--target-params", choices=["all", "no_tau_met"], default="no_tau_met",
                         help="Target parameter set for training (default: no_tau_met)")
     parser.add_argument("--theta-normalization", choices=["none", "zscore"], default="zscore",
@@ -142,12 +142,13 @@ def _plot_train_val_loss(sx, out_dir):
     print(f"    Saved: {fname}")
 
 
-def _plot_residuals_vs_snr(sx, n_test, out_dir):
+def _plot_residuals_vs_snr(sx, n_test, out_dir, theta_true=None):
     if sx.mag is None or sx.stds_test is None or sx.means_test is None:
         print("    Skipping residuals vs S/N: required arrays missing")
         return
 
-    n_test_eff = min(n_test, len(sx.means_test), len(sx.theta), len(sx.mag))
+    theta_ref = sx.theta if theta_true is None else theta_true
+    n_test_eff = min(n_test, len(sx.means_test), len(theta_ref), len(sx.mag))
     if n_test_eff <= 0:
         return
 
@@ -159,7 +160,7 @@ def _plot_residuals_vs_snr(sx, n_test, out_dir):
 
     n_theta = sx.means_test.shape[1]
     for i in range(n_theta):
-        truth = sx.theta[:n_test_eff, i]
+        truth = theta_ref[:n_test_eff, i]
         pred = sx.means_test[:n_test_eff, i]
         resid = pred - truth
         ok = np.isfinite(resid) & np.isfinite(snr_obj) & (snr_obj > 0)
@@ -180,18 +181,19 @@ def _plot_residuals_vs_snr(sx, n_test, out_dir):
         plt.close()
 
 
-def _plot_posterior_width_vs_truth(sx, n_test, out_dir):
+def _plot_posterior_width_vs_truth(sx, n_test, out_dir, theta_true=None):
     if sx.stds_test is None or sx.theta is None:
         print("    Skipping posterior width plots: required arrays missing")
         return
 
-    n_test_eff = min(n_test, len(sx.stds_test), len(sx.theta))
+    theta_ref = sx.theta if theta_true is None else theta_true
+    n_test_eff = min(n_test, len(sx.stds_test), len(theta_ref))
     if n_test_eff <= 0:
         return
 
     n_theta = sx.stds_test.shape[1]
     for i in range(n_theta):
-        truth = sx.theta[:n_test_eff, i]
+        truth = theta_ref[:n_test_eff, i]
         width = sx.stds_test[:n_test_eff, i]
         ok = np.isfinite(truth) & np.isfinite(width) & (width >= 0)
         if np.sum(ok) < 5:
@@ -347,13 +349,10 @@ def main():
     sx.n_simulation = len(sx.theta)
     print(f"    Kept {sx.n_simulation} valid simulations after cleaning")
 
-    theta_stats = {
-        label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
-        for i, label in enumerate(sx.labels)
-    }
-
     # Optional training-side mock matching against real observations
-    if args.mock_match != "none":
+    if args.test_only and args.mock_match != "none":
+        print("    NOTE: ignoring mock matching in --test-only mode to avoid evaluation distribution shift")
+    elif args.mock_match != "none":
         from validate_noise_model import load_real_data, get_mock_arrays, compute_mock_match_weights
 
         real_data = load_real_data(args.fits_file, patch_id=args.patch_id, aperture=args.aperture)
@@ -413,12 +412,16 @@ def main():
     theta_sigma = None
     n_theta_target = sx.theta.shape[1] if sx.infer_z else sx.theta.shape[1] - 1
     if args.theta_normalization == "zscore":
+        theta_stats = {
+            label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
+            for i, label in enumerate(sx.labels)
+        }
         target_labels = sx.labels[:n_theta_target]
         theta_mu = np.array([theta_stats[label][0] for label in target_labels], dtype=float)
         theta_sigma = np.array([theta_stats[label][1] for label in target_labels], dtype=float)
         theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
         sx.theta[:, :n_theta_target] = (sx.theta[:, :n_theta_target] - theta_mu) / theta_sigma
-        print("    Applied z-score normalization to training targets (stats from pre-match distribution)")
+        print("    Applied z-score normalization to training targets (stats from current distribution)")
 
     if args.skip_train:
         print("Done: quick Euclid preparation finished (simulation + realism).")
@@ -462,11 +465,14 @@ def main():
         sample_with=args.sample_with,
     )
 
+    theta_true_phys = sx.theta.copy()
     if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:
         posterior_test = posterior_test * theta_sigma[None, None, :] + theta_mu[None, None, :]
         sx.means_test = np.median(posterior_test, axis=1)
         sx.stds_test = np.std(posterior_test, axis=1)
-        sx.theta[:, :n_theta_target] = sx.theta[:, :n_theta_target] * theta_sigma[None, :] + theta_mu[None, :]
+        theta_true_phys[:, :n_theta_target] = (
+            theta_true_phys[:, :n_theta_target] * theta_sigma[None, :] + theta_mu[None, :]
+        )
 
     print(f"Posterior test shape: {posterior_test.shape}")
 
@@ -474,6 +480,8 @@ def main():
         from sbipix.plotting import plot_test_performance
 
         print("[6/6] Plotting test-performance diagnostics...")
+        theta_backup = sx.theta
+        sx.theta = theta_true_phys
         plot_test_performance(
             sx,
             n_test=min(posterior_test.shape[0], len(sx.means_test)),
@@ -481,14 +489,15 @@ def main():
             save=True,
             name="euclid_quick_test_",
         )
+        sx.theta = theta_backup
 
-        n_test_diag = min(posterior_test.shape[0], len(sx.means_test), len(sx.theta))
+        n_test_diag = min(posterior_test.shape[0], len(sx.means_test), len(theta_true_phys))
         _plot_train_val_loss(sx, logs_dir)
-        _plot_residuals_vs_snr(sx, n_test_diag, logs_dir)
-        _plot_posterior_width_vs_truth(sx, n_test_diag, logs_dir)
+        _plot_residuals_vs_snr(sx, n_test_diag, logs_dir, theta_true=theta_true_phys)
+        _plot_posterior_width_vs_truth(sx, n_test_diag, logs_dir, theta_true=theta_true_phys)
         _plot_pp_and_sbc(
             posterior_test[:n_test_diag],
-            sx.theta[:n_test_diag],
+            theta_true_phys[:n_test_diag],
             sx.labels[:posterior_test.shape[-1]],
             logs_dir,
         )
