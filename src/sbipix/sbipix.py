@@ -1061,7 +1061,7 @@ class sbipix():
         return np.array(posteriors)        
         
 
-    def get_posteriors_resolved(self, phot_arr, n_gal, n_samples=50, save=True, return_stats=True,sigma_arr=None, bar=True, input_z=None, device='cpu'):
+    def get_posteriors_resolved(self, phot_arr, n_gal, n_samples=50, save=True, return_stats=True,sigma_arr=None, bar=True, input_z=None, device='cpu', sample_with='rejection'):
         """
         Generate posterior samples for resolved galaxy photometry.
 
@@ -1085,6 +1085,8 @@ class sbipix():
             Input redshift if not inferring
         device : str, optional
             Device for inference (default: 'cpu')
+        sample_with : str, optional
+            Posterior sampling backend. Use 'rejection' (default) or 'mcmc'.
 
         Returns
         -------
@@ -1141,6 +1143,20 @@ class sbipix():
         
         with open(model_file, 'rb') as f:
             qphi = pickle.load(f)
+
+        # sbi>=0.18 requires setting sampling backend in build_posterior(), not in sample()
+        if sample_with != 'rejection':
+            anpe_file = self.model_path + 'anpe_' + self.model_name
+            try:
+                with open(anpe_file, 'rb') as f:
+                    anpe = pickle.load(f)
+                qphi = anpe.build_posterior(sample_with=sample_with)
+                print(f"Using posterior sampler backend: {sample_with}")
+            except Exception as exc:
+                print(
+                    f"WARNING: could not rebuild posterior with sample_with='{sample_with}' "
+                    f"from {anpe_file} ({exc}). Falling back to default sampler."
+                )
 
         # Generate posteriors
         posteriors_full = self._get_posterior_obs(
