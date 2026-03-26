@@ -66,10 +66,14 @@ def build_parser():
                         help="Color reference band for vis_color2d mode (default: NISP-Y)")
     parser.add_argument("--mock-match-bins", type=int, default=24,
                         help="Number of bins for mock matching histograms (default: 24)")
+    parser.add_argument("--mock-match-alpha", type=float, default=0.9,
+                        help="Smoothing factor for mock-match weights: probs = alpha*w + (1-alpha)/N (default: 0.9)")
     parser.add_argument("--target-params", choices=["all", "no_tau_met"], default="no_tau_met",
                         help="Target parameter set for training (default: no_tau_met)")
     parser.add_argument("--theta-normalization", choices=["none", "zscore"], default="zscore",
                         help="Normalization for target parameters before training (default: zscore)")
+    parser.add_argument("--sample-with", choices=["rejection", "mcmc"], default="rejection",
+                        help="Posterior sampling method during test (default: rejection)")
     parser.add_argument("--sfr-floor", type=float, default=-5.0,
                         help="Lower clip for log(SFR) (default: -5)")
     parser.add_argument("--sfr-ceil", type=float, default=3.0,
@@ -364,7 +368,11 @@ def main():
         )
         valid = np.isfinite(mock_weights) & (mock_weights > 0)
         if np.any(valid):
-            probs = mock_weights[valid] / mock_weights[valid].sum()
+            alpha = float(np.clip(args.mock_match_alpha, 0.0, 1.0))
+            base_weights = mock_weights[valid].astype(float)
+            base_weights = base_weights / base_weights.sum()
+            probs = alpha * base_weights + (1.0 - alpha) / len(base_weights)
+            probs = probs / probs.sum()
             source_idx = np.where(valid)[0]
             rng = np.random.default_rng(0)
             draw_idx = rng.choice(source_idx, size=sx.n_simulation, replace=True, p=probs)
@@ -373,6 +381,7 @@ def main():
             sx.obs = sx.obs[draw_idx, :]
             eff_n = (mock_weights[valid].sum() ** 2) / np.sum(mock_weights[valid] ** 2)
             print(f"    {match_msg}")
+            print(f"    Applied mock-weight smoothing with alpha={alpha:.3f}")
             print(f"    Applied weighted resampling for training (effective N ≈ {eff_n:.0f})")
             if eff_n < 0.3 * sx.n_simulation:
                 print("    WARNING: low effective sample size after mock matching")
@@ -426,8 +435,8 @@ def main():
     else:
         print("[4/5] Training quick model...")
         n_train = len(sx.theta) if args.max_train_samples <= 0 else min(args.max_train_samples, len(sx.theta))
-        min_thetas = np.percentile(sx.theta[:n_train], 0.5, axis=0)
-        max_thetas = np.percentile(sx.theta[:n_train], 99.5, axis=0)
+        min_thetas = np.percentile(sx.theta[:n_train], 0.1, axis=0)
+        max_thetas = np.percentile(sx.theta[:n_train], 99.9, axis=0)
 
         sx.train(
             min_thetas=min_thetas,
@@ -450,6 +459,7 @@ def main():
         n_samples=args.n_samples,
         return_posterior=True,
         device=args.device,
+        sample_with=args.sample_with,
     )
 
     if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:

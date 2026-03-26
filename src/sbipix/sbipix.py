@@ -943,7 +943,7 @@ class sbipix():
 
         print(f"Model saved to {model_file}")
 
-    def test_performance(self, n_test=1000, n_samples=100, return_posterior=False, device='cpu'):
+    def test_performance(self, n_test=1000, n_samples=100, return_posterior=False, device='cpu', sample_with='rejection'):
         """
         Test model performance on held-out simulations.
 
@@ -957,6 +957,9 @@ class sbipix():
             Whether to return full posterior samples (default: False)
         device : str, optional
             Device for inference (default: 'cpu')
+        sample_with : str, optional
+            Posterior sampling method passed to sbi posterior sampler
+            (default: 'rejection'; alternative: 'mcmc')
 
         Returns
         -------
@@ -992,6 +995,7 @@ class sbipix():
                 qphi.sample(
                     (n_samples,), 
                     x=torch.as_tensor(obs[j].astype(np.float32)).to(device),
+                    sample_with=sample_with,
                     show_progress_bars=False
                 ).detach().to('cpu')
             )
