@@ -23,6 +23,8 @@ def build_parser():
                         help="Stop after simulation + observational realism")
     parser.add_argument("--skip-test", action="store_true",
                         help="Skip performance test after training")
+    parser.add_argument("--test-only", action="store_true",
+                        help="Skip training and run test/diagnostics using an existing saved model")
     parser.add_argument("--no-plot-test", action="store_true",
                         help="Skip the test-performance diagnostic plots")
     parser.add_argument("--skip-simulate", action="store_true",
@@ -414,21 +416,29 @@ def main():
         print("Run without --skip-train to continue to training/testing.")
         return
 
-    print("[4/5] Training quick model...")
-    n_train = len(sx.theta) if args.max_train_samples <= 0 else min(args.max_train_samples, len(sx.theta))
-    min_thetas = np.percentile(sx.theta[:n_train], 0.5, axis=0)
-    max_thetas = np.percentile(sx.theta[:n_train], 99.5, axis=0)
+    if args.test_only:
+        model_file = Path(sx.model_path) / sx.model_name
+        if not model_file.exists():
+            raise FileNotFoundError(
+                f"Requested --test-only but model file not found: {model_file}"
+            )
+        print(f"[4/5] Skipping training (--test-only). Using model: {model_file}")
+    else:
+        print("[4/5] Training quick model...")
+        n_train = len(sx.theta) if args.max_train_samples <= 0 else min(args.max_train_samples, len(sx.theta))
+        min_thetas = np.percentile(sx.theta[:n_train], 0.5, axis=0)
+        max_thetas = np.percentile(sx.theta[:n_train], 99.5, axis=0)
 
-    sx.train(
-        min_thetas=min_thetas,
-        max_thetas=max_thetas,
-        n_max=n_train,
-        epochs_max=args.epochs,
-        nblocks=3,
-        nhidden=64,
-        val_fraction=0.1,
-        device=args.device,
-    )
+        sx.train(
+            min_thetas=min_thetas,
+            max_thetas=max_thetas,
+            n_max=n_train,
+            epochs_max=args.epochs,
+            nblocks=3,
+            nhidden=64,
+            val_fraction=0.1,
+            device=args.device,
+        )
 
     if args.skip_test:
         print("Done: training finished. Skipping test as requested.")
