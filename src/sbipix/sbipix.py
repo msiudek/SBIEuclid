@@ -974,6 +974,20 @@ class sbipix():
         with open(self.model_path + self.model_name, 'rb') as f:
             qphi = pickle.load(f)
 
+        # sbi>=0.18 requires setting sampling backend in build_posterior(), not in sample()
+        if sample_with != 'rejection':
+            anpe_file = self.model_path + 'anpe_' + self.model_name
+            try:
+                with open(anpe_file, 'rb') as f:
+                    anpe = pickle.load(f)
+                qphi = anpe.build_posterior(sample_with=sample_with)
+                print(f"Using posterior sampler backend: {sample_with}")
+            except Exception as exc:
+                print(
+                    f"WARNING: could not rebuild posterior with sample_with='{sample_with}' "
+                    f"from {anpe_file} ({exc}). Falling back to default sampler."
+                )
+
         means, stds, posteriors, modes = [], [], [], []
 
         # Prepare test observations
@@ -987,15 +1001,12 @@ class sbipix():
         if not self.infer_z:
             obs = np.concatenate([obs, np.reshape(self.theta[:, -1], (len(obs), 1))], axis=1)
 
-        print(obs)
-
         # Run inference on test set
         for j in trange(n_test, desc="Testing performance"):
             posterior_samples = np.array(
                 qphi.sample(
                     (n_samples,), 
                     x=torch.as_tensor(obs[j].astype(np.float32)).to(device),
-                    sample_with=sample_with,
                     show_progress_bars=False
                 ).detach().to('cpu')
             )
