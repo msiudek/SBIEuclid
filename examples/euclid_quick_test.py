@@ -440,25 +440,35 @@ def main():
     norm_stats_file = _norm_stats_path(library_dir, sx.model_name)
     if args.theta_normalization == "zscore":
         if args.test_only:
-            if not norm_stats_file.exists():
-                raise FileNotFoundError(
-                    f"Requested --test-only with z-score normalization, but stats file not found: {norm_stats_file}"
-                )
-            theta_mu_loaded, theta_sigma_loaded, labels_loaded = _load_norm_stats(norm_stats_file)
-            if len(theta_mu_loaded) < n_theta_target or len(theta_sigma_loaded) < n_theta_target:
-                raise ValueError(
-                    f"Normalization stats in {norm_stats_file} are incompatible with current target dimensionality"
-                )
-            theta_mu = theta_mu_loaded[:n_theta_target]
-            theta_sigma = theta_sigma_loaded[:n_theta_target]
-            if len(labels_loaded) >= n_theta_target:
-                expected = np.asarray(sx.labels[:n_theta_target], dtype=object)
-                got = labels_loaded[:n_theta_target]
-                if not np.all(expected == got):
+            if norm_stats_file.exists():
+                theta_mu_loaded, theta_sigma_loaded, labels_loaded = _load_norm_stats(norm_stats_file)
+                if len(theta_mu_loaded) < n_theta_target or len(theta_sigma_loaded) < n_theta_target:
                     raise ValueError(
-                        f"Normalization stats labels do not match current targets in {norm_stats_file}"
+                        f"Normalization stats in {norm_stats_file} are incompatible with current target dimensionality"
                     )
-            print(f"    Loaded z-score normalization stats from {norm_stats_file}")
+                theta_mu = theta_mu_loaded[:n_theta_target]
+                theta_sigma = theta_sigma_loaded[:n_theta_target]
+                if len(labels_loaded) >= n_theta_target:
+                    expected = np.asarray(sx.labels[:n_theta_target], dtype=object)
+                    got = labels_loaded[:n_theta_target]
+                    if not np.all(expected == got):
+                        raise ValueError(
+                            f"Normalization stats labels do not match current targets in {norm_stats_file}"
+                        )
+                print(f"    Loaded z-score normalization stats from {norm_stats_file}")
+            else:
+                print(f"    WARNING: norm stats file not found ({norm_stats_file}).")
+                print(f"    Computing z-score stats from current atlas (no mock-match applied in --test-only).")
+                theta_stats = {
+                    label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
+                    for i, label in enumerate(sx.labels)
+                }
+                target_labels = sx.labels[:n_theta_target]
+                theta_mu = np.array([theta_stats[label][0] for label in target_labels], dtype=float)
+                theta_sigma = np.array([theta_stats[label][1] for label in target_labels], dtype=float)
+                theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
+                _save_norm_stats(norm_stats_file, theta_mu, theta_sigma, sx.labels[:n_theta_target])
+                print(f"    Saved computed norm stats to {norm_stats_file} for future use.")
         else:
             theta_stats = {
                 label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
