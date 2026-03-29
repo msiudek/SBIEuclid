@@ -1046,7 +1046,7 @@ class sbipix():
         """
         if not self.infer_z and input_z is not None:
             input_z = np.repeat(input_z, len(obs), axis=0)
-            obs = np.concatenate([obs, np.reshape(input_z, newshape=(len(obs), 1))], axis=1)
+            obs = np.concatenate([obs, np.reshape(input_z, (len(obs), 1))], axis=1)
         
         posteriors = []
         if bar:
