@@ -1045,8 +1045,20 @@ class sbipix():
             Posterior samples.
         """
         if not self.infer_z and input_z is not None:
-            input_z = np.repeat(input_z, len(obs), axis=0)
-            obs = np.concatenate([obs, np.reshape(input_z, (len(obs), 1))], axis=1)
+            input_z = np.asarray(input_z)
+            if input_z.ndim == 0:
+                z_col = np.full((len(obs), 1), float(input_z), dtype=float)
+            else:
+                input_z = np.ravel(input_z)
+                if len(input_z) == 1:
+                    z_col = np.full((len(obs), 1), float(input_z[0]), dtype=float)
+                elif len(input_z) == len(obs):
+                    z_col = np.reshape(input_z, (len(obs), 1))
+                else:
+                    raise ValueError(
+                        f"input_z length mismatch: got {len(input_z)} values for {len(obs)} observations"
+                    )
+            obs = np.concatenate([obs, z_col], axis=1)
         
         posteriors = []
         if bar:
