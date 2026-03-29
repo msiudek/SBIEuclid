@@ -120,6 +120,10 @@ def _load_norm_stats(norm_stats_file):
     return theta_mu, theta_sigma, labels
 
 
+def _norm_label(label):
+    return "".join(str(label).lower().split())
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Run SBIPIX posterior inference on COSMOS_DEEP.fits catalog rows"
@@ -315,16 +319,39 @@ def main():
     norm_path = Path(norm_stats_file)
     if norm_path.exists():
         theta_mu, theta_sigma, stats_labels = _load_norm_stats(norm_path)
-        n_target = min(posteriors.shape[-1], len(theta_mu), len(theta_sigma))
-        posteriors[:, :, :n_target] = (
-            posteriors[:, :, :n_target] * theta_sigma[None, None, :n_target]
-            + theta_mu[None, None, :n_target]
-        )
+        model_labels = np.array(sx.labels[:posteriors.shape[-1]], dtype=object)
+        stats_map = {}
+        for i, lab in enumerate(stats_labels):
+            if i < len(theta_mu) and i < len(theta_sigma):
+                stats_map[_norm_label(lab)] = (float(theta_mu[i]), float(theta_sigma[i]))
+
+        applied = []
+        missing = []
+        for j, lab in enumerate(model_labels):
+            key = _norm_label(lab)
+            if key in stats_map:
+                mu_j, sig_j = stats_map[key]
+                posteriors[:, :, j] = posteriors[:, :, j] * sig_j + mu_j
+                applied.append(str(lab))
+            else:
+                missing.append(str(lab))
+
         posterior_median = np.median(posteriors, axis=1)
         posterior_std = np.std(posteriors, axis=1)
         print(f"Applied de-normalization from: {norm_path}")
+        print(f"Applied norm stats for labels: {applied}")
+        if missing:
+            print(f"WARNING: no matching norm stats labels for: {missing}")
     else:
         print(f"WARNING: normalization stats file not found: {norm_path}")
+
+    labels_now = np.array(sx.labels[:posteriors.shape[-1]], dtype=object)
+    sfr_idx = next((i for i, lab in enumerate(labels_now) if "sfr" in str(lab).lower()), None)
+    if sfr_idx is not None:
+        print(
+            f"SBI SFR min/max: {posterior_median[:, sfr_idx].min():.4f}, "
+            f"{posterior_median[:, sfr_idx].max():.4f}"
+        )
 
     out_file = logs_dir / "cosmos_posteriors.npz"
     np.savez_compressed(
