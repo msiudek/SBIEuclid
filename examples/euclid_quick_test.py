@@ -102,6 +102,28 @@ def _label_is_tau_or_metal(label):
     return ("tau" in ll) or ("[m/h]" in ll) or ("metal" in ll) or ("met" in ll)
 
 
+def _norm_stats_path(library_dir, model_name):
+    return Path(library_dir) / f"norm_stats_{Path(model_name).stem}.npz"
+
+
+def _save_norm_stats(path, theta_mu, theta_sigma, labels):
+    np.savez_compressed(
+        path,
+        theta_mu=np.asarray(theta_mu, dtype=float),
+        theta_sigma=np.asarray(theta_sigma, dtype=float),
+        labels=np.asarray(labels, dtype=object),
+    )
+
+
+def _load_norm_stats(path):
+    data = np.load(path, allow_pickle=True)
+    theta_mu = np.asarray(data["theta_mu"], dtype=float)
+    theta_sigma = np.asarray(data["theta_sigma"], dtype=float)
+    theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
+    labels = np.asarray(data.get("labels", np.array([], dtype=object)), dtype=object)
+    return theta_mu, theta_sigma, labels
+
+
 def _plot_train_val_loss(sx, out_dir):
     anpe_path = Path(sx.model_path) / f"anpe_{sx.model_name}"
     if not anpe_path.exists():
@@ -415,15 +437,37 @@ def main():
     theta_mu = None
     theta_sigma = None
     n_theta_target = sx.theta.shape[1] if sx.infer_z else sx.theta.shape[1] - 1
+    norm_stats_file = _norm_stats_path(library_dir, sx.model_name)
     if args.theta_normalization == "zscore":
-        theta_stats = {
-            label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
-            for i, label in enumerate(sx.labels)
-        }
-        target_labels = sx.labels[:n_theta_target]
-        theta_mu = np.array([theta_stats[label][0] for label in target_labels], dtype=float)
-        theta_sigma = np.array([theta_stats[label][1] for label in target_labels], dtype=float)
-        theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
+        if args.test_only:
+            if not norm_stats_file.exists():
+                raise FileNotFoundError(
+                    f"Requested --test-only with z-score normalization, but stats file not found: {norm_stats_file}"
+                )
+            theta_mu_loaded, theta_sigma_loaded, labels_loaded = _load_norm_stats(norm_stats_file)
+            if len(theta_mu_loaded) < n_theta_target or len(theta_sigma_loaded) < n_theta_target:
+                raise ValueError(
+                    f"Normalization stats in {norm_stats_file} are incompatible with current target dimensionality"
+                )
+            theta_mu = theta_mu_loaded[:n_theta_target]
+            theta_sigma = theta_sigma_loaded[:n_theta_target]
+            if len(labels_loaded) >= n_theta_target:
+                expected = np.asarray(sx.labels[:n_theta_target], dtype=object)
+                got = labels_loaded[:n_theta_target]
+                if not np.all(expected == got):
+                    raise ValueError(
+                        f"Normalization stats labels do not match current targets in {norm_stats_file}"
+                    )
+            print(f"    Loaded z-score normalization stats from {norm_stats_file}")
+        else:
+            theta_stats = {
+                label: (np.mean(sx.theta[:, i]), np.std(sx.theta[:, i]))
+                for i, label in enumerate(sx.labels)
+            }
+            target_labels = sx.labels[:n_theta_target]
+            theta_mu = np.array([theta_stats[label][0] for label in target_labels], dtype=float)
+            theta_sigma = np.array([theta_stats[label][1] for label in target_labels], dtype=float)
+            theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
         sx.theta[:, :n_theta_target] = (sx.theta[:, :n_theta_target] - theta_mu) / theta_sigma
         print("    Applied z-score normalization to training targets (stats from current distribution)")
 
@@ -455,6 +499,10 @@ def main():
             val_fraction=0.1,
             device=args.device,
         )
+
+        if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:
+            _save_norm_stats(norm_stats_file, theta_mu, theta_sigma, sx.labels[:n_theta_target])
+            print(f"    Saved z-score normalization stats to {norm_stats_file}")
 
     if args.skip_test:
         print("Done: training finished. Skipping test as requested.")

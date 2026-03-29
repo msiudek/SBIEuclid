@@ -35,18 +35,75 @@ def _select_patch(cat, patch_id):
     return cat[mask_int | mask_str]
 
 
-def _choose_redshift(cat, redshift_columns, fallback_z):
+def _choose_redshift(cat, redshift_columns):
     for col in redshift_columns:
         if col in cat.colnames:
             z = np.asarray(cat[col], dtype=float)
             return z, col
-    if fallback_z is None:
-        raise ValueError(
-            "No redshift column found. Provide --redshift-columns with an existing column "
-            "or set --fallback-z."
-        )
-    z = np.full(len(cat), float(fallback_z), dtype=float)
-    return z, "fallback-z"
+    return np.full(len(cat), np.nan, dtype=float), "none"
+
+
+def _resolve_optional_path(path_str, project_root):
+    if path_str is None:
+        return None
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = project_root / path
+    return path
+
+
+def _crossmatch_photoz(cat, matched_cat, catalog_id_col, matched_id_col, matched_photoz_col):
+    for col in [catalog_id_col, matched_id_col, matched_photoz_col]:
+        if (col == catalog_id_col and col not in cat.colnames) or (col != catalog_id_col and col not in matched_cat.colnames):
+            raise ValueError(f"Missing required column for matched photo-z: {col}")
+
+    cat_ids = np.asarray(cat[catalog_id_col])
+    matched_ids = np.asarray(matched_cat[matched_id_col])
+    matched_z = np.asarray(matched_cat[matched_photoz_col], dtype=float)
+
+    z_out = np.full(len(cat_ids), np.nan, dtype=float)
+
+    valid_matched = np.isfinite(matched_z)
+    if not np.any(valid_matched):
+        return z_out
+
+    try:
+        cat_ids_i = cat_ids.astype(np.int64)
+        matched_ids_i = matched_ids.astype(np.int64)
+
+        mids = matched_ids_i[valid_matched]
+        mz = matched_z[valid_matched]
+        order = np.argsort(mids)
+        mids = mids[order]
+        mz = mz[order]
+
+        first_idx = np.unique(mids, return_index=True)[1]
+        mids_u = mids[first_idx]
+        mz_u = mz[first_idx]
+
+        idx = np.searchsorted(mids_u, cat_ids_i)
+        hit = (idx < len(mids_u))
+        hit[hit] &= (mids_u[idx[hit]] == cat_ids_i[hit])
+        z_out[hit] = mz_u[idx[hit]]
+        return z_out
+    except Exception:
+        z_map = {}
+        for mid, zz in zip(matched_ids[valid_matched], matched_z[valid_matched]):
+            key = str(mid).strip()
+            if key not in z_map:
+                z_map[key] = zz
+        for i, cid in enumerate(cat_ids):
+            z_out[i] = z_map.get(str(cid).strip(), np.nan)
+        return z_out
+
+
+def _load_norm_stats(norm_stats_file):
+    data = np.load(norm_stats_file, allow_pickle=True)
+    theta_mu = np.asarray(data["theta_mu"], dtype=float)
+    theta_sigma = np.asarray(data["theta_sigma"], dtype=float)
+    theta_sigma = np.where(theta_sigma < 1e-6, 1.0, theta_sigma)
+    labels = np.asarray(data.get("labels", np.array([], dtype=object)), dtype=object)
+    return theta_mu, theta_sigma, labels
 
 
 def build_parser():
@@ -66,8 +123,16 @@ def build_parser():
     parser.add_argument("--sample-with", choices=["rejection", "mcmc"], default="mcmc")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--redshift-columns", default="lp_zBEST,photoz,zbest,z_spec,zphot,ez_z_phot")
-    parser.add_argument("--fallback-z", type=float, default=None,
-                        help="Use fixed redshift if no valid redshift column exists")
+    parser.add_argument("--matched-file", default="obs/obs_properties/matched_euclid_farmer.fits",
+                        help="Matched Euclid-FARMER FITS for photo-z crossmatch (set empty to disable)")
+    parser.add_argument("--catalog-id-column", default="object_id",
+                        help="ID column in COSMOS_DEEP catalog to match with matched-file")
+    parser.add_argument("--matched-euclid-column", default="euclid_idx",
+                        help="Euclid index column in matched-file")
+    parser.add_argument("--matched-photoz-column", default="lp_zbest",
+                        help="Photo-z column in matched-file")
+    parser.add_argument("--norm-stats-file", default=None,
+                        help="Optional normalization stats .npz; default auto-detect from model-name")
     parser.add_argument("--run-name", default="cosmos_catalog_inference")
     return parser
 
@@ -110,11 +175,43 @@ def main():
     if len(cat) == 0:
         raise ValueError(f"No rows found for patch_id={args.patch_id}")
 
-    z_all, z_source = _choose_redshift(cat, _parse_redshift_columns(args.redshift_columns), args.fallback_z)
+    z_all = np.full(len(cat), np.nan, dtype=float)
+    z_source_parts = []
+
+    matched_file = args.matched_file.strip() if isinstance(args.matched_file, str) else args.matched_file
+    if matched_file:
+        matched_path = _resolve_optional_path(matched_file, project_root)
+        if matched_path is not None and matched_path.exists():
+            matched_cat = Table.read(matched_path)
+            z_matched = _crossmatch_photoz(
+                cat,
+                matched_cat,
+                catalog_id_col=args.catalog_id_column,
+                matched_id_col=args.matched_euclid_column,
+                matched_photoz_col=args.matched_photoz_column,
+            )
+            has_match = np.isfinite(z_matched)
+            z_all[has_match] = z_matched[has_match]
+            z_source_parts.append(
+                f"{args.matched_photoz_column} from {matched_path.name} via {args.catalog_id_column}->{args.matched_euclid_column} ({np.sum(has_match)}/{len(cat)})"
+            )
+        else:
+            print(f"WARNING: matched-file not found: {matched_path}. Falling back to in-catalog redshift columns.")
+
+    missing_z = ~np.isfinite(z_all)
+    if np.any(missing_z):
+        z_catalog, catalog_source = _choose_redshift(cat, _parse_redshift_columns(args.redshift_columns))
+        fill = missing_z & np.isfinite(z_catalog)
+        if np.any(fill):
+            z_all[fill] = z_catalog[fill]
+            z_source_parts.append(f"{catalog_source} in-catalog fallback ({np.sum(fill)} rows)")
+
+    z_source = " + ".join(z_source_parts) if z_source_parts else "unknown"
 
     n_obj = len(cat) if args.n_max <= 0 else min(args.n_max, len(cat))
     cat = cat[:n_obj]
     z_all = z_all[:n_obj]
+    catalog_ids_all = np.asarray(cat[args.catalog_id_column])[:n_obj]
 
     n_filt = len(FILTER_COL_STEMS)
     flux = np.full((n_obj, n_filt), np.nan, dtype=float)
@@ -142,19 +239,23 @@ def main():
         sigma_arr[nondet[:, fi], fi] = limits[fi]
 
     n_detected_filters = np.sum(detected, axis=1)
-    keep = n_detected_filters >= args.min_detected_filters
+    keep_det = n_detected_filters >= args.min_detected_filters
+    keep_z = np.isfinite(z_all)
+    keep = keep_det & keep_z
     if not np.any(keep):
         raise ValueError(
-            f"No galaxies have >= {args.min_detected_filters} detected filters under snr_min={args.snr_min}"
+            f"No galaxies satisfy both: >= {args.min_detected_filters} detected filters and finite photo-z"
         )
 
     phot_arr = phot_arr[keep]
     sigma_arr = sigma_arr[keep]
     z_use = z_all[keep]
     n_detected_filters = n_detected_filters[keep]
+    catalog_ids_use = catalog_ids_all[keep]
 
     print(f"Catalog rows in patch {args.patch_id}: {n_obj}")
-    print(f"Kept for inference: {len(phot_arr)} (min detected filters = {args.min_detected_filters})")
+    print(f"Kept for inference: {len(phot_arr)} (min detected filters = {args.min_detected_filters}, finite photo-z required)")
+    print(f"Dropped due to missing photo-z: {np.sum(~keep_z)}")
     print(f"Redshift source: {z_source}")
     print("Detected-filter percentiles (10/50/90): "
           f"{np.percentile(n_detected_filters, [10, 50, 90]).astype(int)}")
@@ -175,6 +276,25 @@ def main():
     posterior_median = np.median(posteriors, axis=1)
     posterior_std = np.std(posteriors, axis=1)
 
+    norm_stats_file = args.norm_stats_file
+    if norm_stats_file is None:
+        model_stem = Path(args.model_name).stem
+        norm_stats_file = str(project_root / "library" / f"norm_stats_{model_stem}.npz")
+
+    norm_path = Path(norm_stats_file)
+    if norm_path.exists():
+        theta_mu, theta_sigma, stats_labels = _load_norm_stats(norm_path)
+        n_target = min(posteriors.shape[-1], len(theta_mu), len(theta_sigma))
+        posteriors[:, :, :n_target] = (
+            posteriors[:, :, :n_target] * theta_sigma[None, None, :n_target]
+            + theta_mu[None, None, :n_target]
+        )
+        posterior_median = np.median(posteriors, axis=1)
+        posterior_std = np.std(posteriors, axis=1)
+        print(f"Applied de-normalization from: {norm_path}")
+    else:
+        print(f"WARNING: normalization stats file not found: {norm_path}")
+
     out_file = logs_dir / "cosmos_posteriors.npz"
     np.savez_compressed(
         out_file,
@@ -182,13 +302,15 @@ def main():
         posterior_median=posterior_median,
         posterior_std=posterior_std,
         redshift=z_use,
+        catalog_id=catalog_ids_use,
         n_detected_filters=n_detected_filters,
         labels=np.array(sx.labels[:posteriors.shape[-1]], dtype=object),
         model_name=np.array([args.model_name], dtype=object),
         sample_with=np.array([args.sample_with], dtype=object),
+        norm_stats_file=np.array([str(norm_path)], dtype=object),
     )
     print(f"Saved: {out_file}")
-    print("Note: if the model was trained with target normalization, outputs remain in model space unless you apply matching de-normalization stats.")
+    print("Saved outputs are in physical space when normalization stats are available.")
 
 
 if __name__ == "__main__":
