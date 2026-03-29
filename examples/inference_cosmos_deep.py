@@ -52,12 +52,26 @@ def _resolve_optional_path(path_str, project_root):
     return path
 
 
+def _get_catalog_ids(cat, catalog_id_col, row_indices):
+    if catalog_id_col in {"__row_index__", "euclid_idx", "row_index"}:
+        return np.asarray(row_indices)
+    if catalog_id_col not in cat.colnames:
+        raise ValueError(
+            f"Catalog ID column '{catalog_id_col}' not found. "
+            f"Use --catalog-id-column __row_index__ to match with euclid_idx row indices."
+        )
+    return np.asarray(cat[catalog_id_col])
+
+
 def _crossmatch_photoz(cat, matched_cat, catalog_id_col, matched_id_col, matched_photoz_col):
-    for col in [catalog_id_col, matched_id_col, matched_photoz_col]:
-        if (col == catalog_id_col and col not in cat.colnames) or (col != catalog_id_col and col not in matched_cat.colnames):
+    for col in [matched_id_col, matched_photoz_col]:
+        if col not in matched_cat.colnames:
             raise ValueError(f"Missing required column for matched photo-z: {col}")
 
-    cat_ids = np.asarray(cat[catalog_id_col])
+    if "__catalog_match_id" not in cat.colnames:
+        raise ValueError("Internal error: __catalog_match_id missing before crossmatch")
+
+    cat_ids = np.asarray(cat["__catalog_match_id"])
     matched_ids = np.asarray(matched_cat[matched_id_col])
     matched_z = np.asarray(matched_cat[matched_photoz_col], dtype=float)
 
@@ -125,8 +139,8 @@ def build_parser():
     parser.add_argument("--redshift-columns", default="lp_zBEST,photoz,zbest,z_spec,zphot,ez_z_phot")
     parser.add_argument("--matched-file", default="obs/obs_properties/matched_euclid_farmer.fits",
                         help="Matched Euclid-FARMER FITS for photo-z crossmatch (set empty to disable)")
-    parser.add_argument("--catalog-id-column", default="object_id",
-                        help="ID column in COSMOS_DEEP catalog to match with matched-file")
+    parser.add_argument("--catalog-id-column", default="__row_index__",
+                        help="ID column in COSMOS_DEEP catalog to match with matched-file; use __row_index__ for euclid_idx")
     parser.add_argument("--matched-euclid-column", default="euclid_idx",
                         help="Euclid index column in matched-file")
     parser.add_argument("--matched-photoz-column", default="lp_zbest",
@@ -170,8 +184,25 @@ def main():
 
     sx.load_obs_features()
 
-    cat = Table.read(args.fits_file)
-    cat = _select_patch(cat, args.patch_id)
+    cat_all = Table.read(args.fits_file)
+    row_index_all = np.arange(len(cat_all), dtype=np.int64)
+    cat = _select_patch(cat_all, args.patch_id)
+    # Recompute mask robustly without changing original selection semantics
+    patch_col = cat_all["patch_id_list"]
+    try:
+        mask_int = patch_col == int(args.patch_id) if args.patch_id is not None else np.ones(len(cat_all), dtype=bool)
+    except (TypeError, ValueError):
+        mask_int = np.zeros(len(cat_all), dtype=bool)
+    if args.patch_id is None:
+        mask = np.ones(len(cat_all), dtype=bool)
+    else:
+        mask_str = np.array([str(v).strip() == str(args.patch_id) for v in patch_col])
+        mask = mask_int | mask_str
+    row_index_patch = row_index_all[mask]
+
+    cat_ids_patch = _get_catalog_ids(cat, args.catalog_id_column, row_index_patch)
+    cat["__catalog_match_id"] = cat_ids_patch
+
     if len(cat) == 0:
         raise ValueError(f"No rows found for patch_id={args.patch_id}")
 
@@ -211,7 +242,7 @@ def main():
     n_obj = len(cat) if args.n_max <= 0 else min(args.n_max, len(cat))
     cat = cat[:n_obj]
     z_all = z_all[:n_obj]
-    catalog_ids_all = np.asarray(cat[args.catalog_id_column])[:n_obj]
+    catalog_ids_all = np.asarray(cat["__catalog_match_id"])[:n_obj]
 
     n_filt = len(FILTER_COL_STEMS)
     flux = np.full((n_obj, n_filt), np.nan, dtype=float)
