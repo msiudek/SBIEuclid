@@ -134,11 +134,11 @@ def build_parser():
     parser.add_argument("--noise-prefix", default="north_2fwhm", choices=["north_2fwhm", "north_3fwhm"])
     parser.add_argument("--model-name", default="post_obs_euclid_north_2fwhm_quick.pkl")
     parser.add_argument("--n-max", type=int, default=5000, help="Max galaxies to infer (<=0 means all)")
-    parser.add_argument("--n-samples", type=int, default=200)
+    parser.add_argument("--n-samples", type=int, default=500)
     parser.add_argument("--min-detected-filters", type=int, default=2)
     parser.add_argument("--snr-min", type=float, default=-5.0,
                         help="Detection threshold for using flux+err directly; lower values are treated as non-detections")
-    parser.add_argument("--sample-with", choices=["rejection", "mcmc"], default="mcmc")
+    parser.add_argument("--sample-with", choices=["rejection", "mcmc"], default="rejection")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--redshift-columns", default="lp_zBEST,photoz,zbest,z_spec,zphot,ez_z_phot")
     parser.add_argument("--matched-file", default="obs/obs_properties/matched_euclid_farmer.fits",
@@ -295,18 +295,22 @@ def main():
     print("Detected-filter percentiles (10/50/90): "
           f"{np.percentile(n_detected_filters, [10, 50, 90]).astype(int)}")
 
-    posteriors = sx.get_posteriors_resolved(
-        phot_arr=np.copy(phot_arr),
-        n_gal=args.patch_id if args.patch_id is not None else 0,
+    posterior_kwargs = {}
+    if args.sample_with != "rejection":
+        posterior_kwargs["sample_with"] = args.sample_with
+
+    posterior_result = sx.get_posteriors_resolved(
+        np.copy(phot_arr),
+        args.patch_id if args.patch_id is not None else 0,
+        input_z=z_use,
         n_samples=args.n_samples,
         save=False,
         return_stats=False,
         sigma_arr=np.copy(sigma_arr),
-        bar=True,
-        input_z=z_use,
         device=args.device,
-        sample_with=args.sample_with,
+        **posterior_kwargs,
     )
+    posteriors = posterior_result[0] if isinstance(posterior_result, tuple) else posterior_result
 
     posterior_median = np.median(posteriors, axis=1)
     posterior_std = np.std(posteriors, axis=1)
