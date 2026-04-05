@@ -660,10 +660,10 @@ def build_parser():
                    help="Multiply sigma std by this factor before sampling (default: 1.2)")
     p.add_argument("--smooth-bins", action="store_true",
                    help="Interpolate sigma statistics between bins instead of hard digitize")
-    p.add_argument("--sigma-sampler", choices=["truncnorm", "lognormal"], default="truncnorm",
-                   help="Distribution used to sample sigma values (default: truncnorm)")
+    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal"], default="empirical",
+                   help="Distribution used to sample sigma values (default: empirical)")
     p.add_argument("--sigma-clip-max", type=float, default=0.8,
-                   help="Clip sampled sigma values above this threshold in mag (default: 0.8)")
+                   help="Clip sampled sigma values above this threshold in mag for non-empirical samplers (default: 0.8)")
     p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="sigma_mag",
                    help="Noise model: classic sigma(mag) or depth-corrected flux model (default: sigma_mag)")
     p.add_argument("--depth-nsigma", type=float, default=1.0,
@@ -694,6 +694,57 @@ def build_parser():
                    help="Second band for 2D color matching; color is band minus this band (default: NISP-Y)")
     p.add_argument("--mock-match-bins", type=int, default=24,
                    help="Number of bins per axis for mock matching (default: 24)")
+
+    # Simulation-calibration options
+    p.add_argument("--use-empirical-z", action="store_true",
+                   help="Use KDE-based empirical redshift prior from COSMOS catalog")
+    p.add_argument("--empirical-z-fits", default="obs/obs_properties/matched_euclid_farmer.fits",
+                   help="FITS catalog path for empirical z KDE (default: matched_euclid_farmer.fits)")
+    p.add_argument("--empirical-z-columns", nargs="+",
+                   default=["lp_zbest", "lp_zBEST", "ez_z_phot", "photoz", "zbest", "z_phot"],
+                   help="Candidate redshift columns for empirical z KDE")
+    p.add_argument("--use-exponential-av", action="store_true",
+                   help="Use Av ~ Exp(scale), clipped to [av-clip-min, av-clip-max]")
+    p.add_argument("--av-scale", type=float, default=0.5,
+                   help="Scale for exponential Av prior (default: 0.5)")
+    p.add_argument("--av-clip-min", type=float, default=0.0,
+                   help="Lower clip for Av prior (default: 0.0)")
+    p.add_argument("--av-clip-max", type=float, default=2.0,
+                   help="Upper clip for Av prior (default: 2.0)")
+    p.add_argument("--use-normal-metallicity", action="store_true",
+                   help="Use metallicity Z ~ N(mu,sigma), clipped to [met-clip-min, met-clip-max]")
+    p.add_argument("--met-mu", type=float, default=-0.5,
+                   help="Mean metallicity [M/H] for normal prior (default: -0.5)")
+    p.add_argument("--met-sigma", type=float, default=0.3,
+                   help="Std metallicity [M/H] for normal prior (default: 0.3)")
+    p.add_argument("--met-clip-min", type=float, default=-1.5,
+                   help="Lower metallicity clip (default: -1.5)")
+    p.add_argument("--met-clip-max", type=float, default=0.3,
+                   help="Upper metallicity clip (default: 0.3)")
+    p.add_argument("--use-schechter-mass", action="store_true",
+                   help="Use Schechter-like stellar-mass prior instead of uniform logM")
+    p.add_argument("--schechter-alpha", type=float, default=-1.3,
+                   help="Schechter faint-end slope alpha (default: -1.3)")
+    p.add_argument("--schechter-logm-star", type=float, default=10.7,
+                   help="Schechter logM* (default: 10.7)")
+    p.add_argument("--use-ssfr-lognormal-prior", action="store_true",
+                   help="Switch to sSFRlognormal prior and use ssfr-min/max")
+    p.add_argument("--ssfr-min", type=float, default=-11.0,
+                   help="Minimum log sSFR for sSFRlognormal mode (default: -11)")
+    p.add_argument("--ssfr-max", type=float, default=-8.0,
+                   help="Maximum log sSFR for sSFRlognormal mode (default: -8)")
+    p.add_argument("--override-sfr-main-sequence", action="store_true",
+                   help="Override simulated SFR with logSFR = a*logM + b + N(0,scatter)")
+    p.add_argument("--ms-slope", type=float, default=0.8,
+                   help="Main-sequence slope a (default: 0.8)")
+    p.add_argument("--ms-intercept", type=float, default=-7.0,
+                   help="Main-sequence intercept b (default: -7.0)")
+    p.add_argument("--ms-scatter", type=float, default=0.3,
+                   help="Main-sequence Gaussian scatter (default: 0.3)")
+    p.add_argument("--ms-sfr-floor", type=float, default=-10.0,
+                   help="Lower clip for overridden logSFR (default: -10)")
+    p.add_argument("--ms-sfr-ceil", type=float, default=None,
+                   help="Optional upper clip for overridden logSFR")
     return p
 
 
@@ -783,6 +834,7 @@ def main():
         print("[1/3] Loading existing simulation...")
         sx.load_simulation()
     else:
+        empirical_z_fits = args.empirical_z_fits if args.empirical_z_fits is not None else fits_path
         print(f"[1/3] Simulating {args.n_sim} galaxy SEDs...")
         sx.simulate(
             mass_min=6.0, mass_max=11.5,
@@ -790,6 +842,27 @@ def main():
             Z_min=-1.7, Z_max=0.3,
             dust_model="Calzetti", dust_prior="flat",
             Av_min=0.0, Av_max=2.5,
+            use_empirical_z=args.use_empirical_z,
+            empirical_z_fits=empirical_z_fits,
+            empirical_z_columns=tuple(args.empirical_z_columns),
+            use_exponential_av=args.use_exponential_av,
+            av_scale=args.av_scale,
+            av_clip=(args.av_clip_min, args.av_clip_max),
+            use_normal_metallicity=args.use_normal_metallicity,
+            metallicity_mu=args.met_mu,
+            metallicity_sigma=args.met_sigma,
+            metallicity_clip=(args.met_clip_min, args.met_clip_max),
+            use_schechter_mass=args.use_schechter_mass,
+            schechter_alpha=args.schechter_alpha,
+            schechter_logm_star=args.schechter_logm_star,
+            use_ssfr_lognormal_prior=args.use_ssfr_lognormal_prior,
+            ssfr_clip=(args.ssfr_min, args.ssfr_max),
+            override_sfr_main_sequence=args.override_sfr_main_sequence,
+            ms_slope=args.ms_slope,
+            ms_intercept=args.ms_intercept,
+            ms_scatter=args.ms_scatter,
+            ms_sfr_floor=args.ms_sfr_floor,
+            ms_sfr_ceil=args.ms_sfr_ceil,
         )
         sx.load_simulation()
 

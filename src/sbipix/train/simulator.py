@@ -115,7 +115,9 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         massval = priors.sample_mass_prior()
 
         # Sample τ-delayed SFH parameters
-        ti = np.random.uniform(0.0, cosmology.age(zval).value)[0] # Time when SF began, cosmic (Gyr)
+        age_gyr = float(cosmology.age(zval).value)
+        ti_max = max(age_gyr - 1e-3, 1e-3)
+        ti = np.random.uniform(0.0, ti_max, size=1)[0]  # Time when SF began, cosmic (Gyr)
         tau =  10**(np.random.uniform(np.log10(1e-2), np.log10(100)))  # Timescale of decrease (Gyr)
 
         # Generate SFH

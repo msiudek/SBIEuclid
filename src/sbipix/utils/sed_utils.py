@@ -157,7 +157,11 @@ def sfh_delayed_exponential(t, logmassval, tau, ti):
         lambda t: (t-ti) * np.exp(-(t-ti)/tau) * escalon(t, ti),
         np.min(t), np.max(t)
     )
-    A = 10**logmassval / integral_result[0]
+    denom = float(integral_result[0])
+    if (not np.isfinite(denom)) or (denom <= 0.0):
+        sfh = np.zeros_like(t, dtype=float)
+        return sfh, t
+    A = 10**logmassval / denom
     
     sfh = A * (t-ti) * np.exp(-(t-ti)/tau) * escalon(t, ti)
     return sfh, t  # Units are M☉/Gyr & Gyr

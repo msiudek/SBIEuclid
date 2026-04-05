@@ -16,6 +16,7 @@ Outputs (with --prefix <prefix>):
   percentiles_<prefix>.npy       magnitude-bin boundaries (n_cuts × n_filters)
   mean_sigma_<prefix>.npy        mean mag uncertainty per bin  (n_filters × n_bins)
   std_sigma_<prefix>.npy         std  mag uncertainty per bin  (n_filters × n_bins)
+    sigma_samples_<prefix>.npy     empirical sigma samples per filter/bin
   background_noise_<prefix>.npy  1-sigma flux limit per filter (microJy)
 """
 
@@ -102,8 +103,7 @@ def _to_filter_major(arr, n_filters):
 
 
 def compute_noise_features(phot_ujy, err_ujy, percentile_cuts,
-                           min_bin_population=20, snr_min=-5.0,
-                           mag_err_clip_max=2.0, std_sigma_clip_max=1.0):
+                           min_bin_population=20, snr_min=-10.0):
     """Compute percentile bins and mag uncertainty statistics per filter."""
     tiny = 1e-30
     valid = np.isfinite(phot_ujy) & np.isfinite(err_ujy) & (err_ujy > 0)
@@ -117,7 +117,7 @@ def compute_noise_features(phot_ujy, err_ujy, percentile_cuts,
 
     mag = -2.5 * np.log10((phot_safe * 1e-6) / 3631.0)
     mag_err = np.abs(-2.5 / np.log(10) * err_safe / phot_safe)
-    mag_err = np.clip(mag_err, 0.0, mag_err_clip_max)
+    mag_err = np.where(np.isfinite(mag_err), mag_err, np.nan)
 
     n_filters = phot_ujy.shape[0]
     n_bins = len(percentile_cuts) + 1
@@ -125,6 +125,11 @@ def compute_noise_features(phot_ujy, err_ujy, percentile_cuts,
     percentiles = np.full((len(percentile_cuts), n_filters), np.nan)
     mean_sigma = np.full((n_filters, n_bins), np.nan)
     std_sigma = np.full((n_filters, n_bins), np.nan)
+    sigma_samples = np.empty((n_filters, n_bins), dtype=object)
+
+    for i in range(n_filters):
+        for j in range(n_bins):
+            sigma_samples[i, j] = np.array([], dtype=float)
 
     for i in range(n_filters):
         mags_i = mag[i, :]
@@ -153,9 +158,10 @@ def compute_noise_features(phot_ujy, err_ujy, percentile_cuts,
             vals = vals[np.isfinite(vals)]
             if vals.size >= min_bin_population:
                 mean_sigma[i, j] = np.nanmean(vals)
-                std_sigma[i, j] = np.minimum(np.nanstd(vals), std_sigma_clip_max)
+                std_sigma[i, j] = np.nanstd(vals)
+                sigma_samples[i, j] = vals.copy()
 
-    return percentiles, mean_sigma, std_sigma
+    return percentiles, mean_sigma, std_sigma, sigma_samples
 
 
 def compute_background_limits(phot_ujy, err_ujy, sigma_level=1.0,
@@ -356,12 +362,12 @@ Input modes (mutually exclusive):
                         help="Percentile cuts for mag bins (default: 5 15 30 50 70 90)")
     parser.add_argument("--min-bin-population", type=int, default=20,
                         help="Minimum valid samples required in a mag bin to compute sigma stats (default: 20)")
-    parser.add_argument("--snr-min", type=float, default=-5.0,
-                        help="Minimum SNR cut applied to valid samples (default: -5)")
+    parser.add_argument("--snr-min", type=float, default=-10.0,
+                        help="Minimum SNR cut applied to valid samples (default: -10)")
     parser.add_argument("--mag-err-clip-max", type=float, default=2.0,
-                        help="Maximum allowed magnitude uncertainty used in bin statistics (default: 2.0 mag)")
+                        help="Deprecated, ignored: magnitude uncertainties are no longer clipped")
     parser.add_argument("--std-sigma-clip-max", type=float, default=1.0,
-                        help="Maximum allowed std_sigma per bin (default: 1.0 mag)")
+                        help="Deprecated, ignored: std_sigma is no longer clipped")
     parser.add_argument("--faint-percentile", type=float, default=20.0,
                         help="Use fluxes below this percentile to estimate background depth (default: 20)")
     parser.add_argument("--sigma-limit", type=float, default=1.0,
@@ -410,14 +416,12 @@ Input modes (mutually exclusive):
         err  = _to_filter_major(err,  n_filters)
 
     lam_eff = compute_lambda_eff_from_curves(filter_paths)
-    percentiles, mean_sigma, std_sigma = compute_noise_features(
+    percentiles, mean_sigma, std_sigma, sigma_samples = compute_noise_features(
         phot,
         err,
         args.percentiles,
         min_bin_population=args.min_bin_population,
         snr_min=args.snr_min,
-        mag_err_clip_max=args.mag_err_clip_max,
-        std_sigma_clip_max=args.std_sigma_clip_max,
     )
     limits = compute_background_limits(
         phot,
@@ -433,6 +437,7 @@ Input modes (mutually exclusive):
     np.save(os.path.join(out, f"percentiles_{p}.npy"),        percentiles)
     np.save(os.path.join(out, f"mean_sigma_{p}.npy"),         mean_sigma)
     np.save(os.path.join(out, f"std_sigma_{p}.npy"),          std_sigma)
+    np.save(os.path.join(out, f"sigma_samples_{p}.npy"),      sigma_samples)
     np.save(os.path.join(out, f"background_noise_{p}.npy"),   limits)
 
     print("\nGenerated files:")
@@ -441,6 +446,7 @@ Input modes (mutually exclusive):
         (f"percentiles_{p}.npy",     percentiles),
         (f"mean_sigma_{p}.npy",      mean_sigma),
         (f"std_sigma_{p}.npy",       std_sigma),
+        (f"sigma_samples_{p}.npy",   sigma_samples),
         (f"background_noise_{p}.npy", limits),
     ]:
         print(f"  {os.path.join(out, name)}  shape={arr.shape}")

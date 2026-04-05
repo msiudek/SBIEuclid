@@ -9,7 +9,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import sklearn.metrics as sm
-import fsps
+try:
+    import fsps
+except Exception:
+    fsps = None
 import dense_basis as db
 from dense_basis import make_filvalkit_simple, calc_fnu_sed_fast
 from sbipix.utils.sed_utils import mag_conversion

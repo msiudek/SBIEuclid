@@ -49,11 +49,11 @@ def build_parser():
     parser.add_argument("--detection-model", default="probabilistic",
                         choices=["hard", "probabilistic"],
                         help="Detection model (default: probabilistic)")
-    parser.add_argument("--sigma-sampler", default="lognormal",
-                        choices=["truncnorm", "lognormal"],
-                        help="Sigma sampler distribution (default: lognormal)")
+    parser.add_argument("--sigma-sampler", default="empirical",
+                        choices=["empirical", "truncnorm", "lognormal"],
+                        help="Sigma sampler distribution (default: empirical)")
     parser.add_argument("--sigma-clip-max", type=float, default=0.8,
-                        help="Clip sampled sigma above this mag threshold (default: 0.8)")
+                        help="Clip sampled sigma above this mag threshold for non-empirical samplers (default: 0.8)")
     parser.add_argument("--fits-file", default="obs/obs_properties/COSMOS_DEEP.fits",
                         help="Real COSMOS-Deep FITS file for mock matching")
     parser.add_argument("--patch-id", type=int, default=98,
