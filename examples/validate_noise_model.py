@@ -27,7 +27,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +51,7 @@ COLOR_PAIRS = [
 ]
 
 NONDET_MAG = 99.0
-SNR_MIN = -5.0
+SNR_DETECTION_THRESHOLD = 2.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
 
@@ -224,7 +223,7 @@ def compute_detection_fraction(x, detected, bins, min_count=25):
     return centers, frac, total
 
 
-def load_real_data(fits_path, patch_id=98, aperture="3fwhm", snr_min=SNR_MIN):
+def load_real_data(fits_path, patch_id=98, aperture="3fwhm", snr_min=SNR_DETECTION_THRESHOLD):
     """
     Load photometry from COSMOS-Deep FITS catalog.
 
@@ -264,7 +263,7 @@ def load_real_data(fits_path, patch_id=98, aperture="3fwhm", snr_min=SNR_MIN):
 
         valid = np.isfinite(flux) & np.isfinite(err) & (err > 0)
         snr = np.where(valid, flux / err, np.nan)
-        detected = valid & np.isfinite(snr) & (snr > snr_min) & (flux > 0)
+        detected = valid & np.isfinite(snr) & (snr >= snr_min) & (flux > 0)
 
         real_flux[fi] = flux
         real_err[fi] = err
@@ -439,16 +438,25 @@ def plot_detection_fraction(fi, real_mag, real_det, mock_mag, mock_det, outdir):
     return out
 
 
-def plot_detection_fraction_vs_flux(fi, real_data, mock_data, limits, outdir):
-    """Detection fraction vs flux using the same limit definition for real and mock."""
+def plot_detection_fraction_vs_flux(fi, real_data, mock_data, limits, outdir,
+                                    snr_detection_threshold=SNR_DETECTION_THRESHOLD):
+    """Detection fraction vs flux with consistent SNR-threshold detection."""
     _style()
     limit_flux = limits[fi]
     real_flux = real_data["flux"][fi]
+    real_err = real_data["err"][fi]
     real_valid = real_data["valid"][fi]
-    real_detected = real_valid & (real_flux > limit_flux)
+    real_snr = np.full_like(real_flux, np.nan, dtype=float)
+    np.divide(real_flux, real_err, out=real_snr, where=real_valid)
+    real_detected = real_valid & np.isfinite(real_snr) & (real_snr >= snr_detection_threshold) & (real_flux > 0)
 
     mock_flux = mock_data["true_flux"][fi]
-    mock_detected = mock_data["det"][fi]
+    mock_mag = mock_data["mag"][fi]
+    mock_sigma = mock_data["sigma"][fi]
+    mock_snr = np.full_like(mock_sigma, np.nan, dtype=float)
+    good_sigma = np.isfinite(mock_sigma) & (mock_sigma > 0)
+    mock_snr[good_sigma] = 2.5 / (np.log(10) * mock_sigma[good_sigma])
+    mock_detected = (mock_mag < NONDET_MAG - 0.5) & np.isfinite(mock_snr) & (mock_snr >= snr_detection_threshold)
 
     positive_real = real_flux[real_valid & (real_flux > 0)]
     positive_mock = mock_flux[np.isfinite(mock_flux) & (mock_flux > 0)]
@@ -470,7 +478,7 @@ def plot_detection_fraction_vs_flux(fi, real_data, mock_data, limits, outdir):
     axes[0].set_xscale("log")
     axes[0].set_xlabel("Flux (μJy)")
     axes[0].set_ylabel("Detection fraction")
-    axes[0].set_title("Detection fraction vs flux")
+    axes[0].set_title(f"Detection fraction vs flux (SNR ≥ {snr_detection_threshold:g})")
     axes[0].set_ylim(-0.05, 1.15)
     axes[0].legend(loc="lower right")
 
@@ -529,52 +537,48 @@ def plot_sigma_distribution(fi, real_sigma, mock_sigma, outdir):
 
 
 def plot_colors(real_mag, mock_mag, outdir):
-    """Color plots with real density background and mock contours."""
+    """Color plots with side-by-side real and mock density panels."""
     _style()
     n_colors = len(COLOR_PAIRS)
-    ncols = min(3, n_colors)
-    nrows = (n_colors + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
-    axes = np.array(axes).flatten()
+    fig, axes = plt.subplots(n_colors, 2, figsize=(12, 4 * n_colors), sharex=True, sharey=True)
+    axes = np.atleast_2d(axes)
 
     for idx, (ai, bi, label) in enumerate(COLOR_PAIRS):
-        ax = axes[idx]
         # Real
         det_r = np.isfinite(real_mag[ai]) & np.isfinite(real_mag[bi])
         color_r = real_mag[ai][det_r] - real_mag[bi][det_r]
         mag_r = real_mag[bi][det_r]
+
         # Mock
         det_m = (mock_mag[ai] < NONDET_MAG - 0.5) & (mock_mag[bi] < NONDET_MAG - 0.5)
         color_m = mock_mag[ai][det_m] - mock_mag[bi][det_m]
         mag_m = mock_mag[bi][det_m]
 
+        ax_r = axes[idx, 0]
+        ax_m = axes[idx, 1]
+
         if color_r.size > 0:
-            hb = ax.hexbin(mag_r, color_r, gridsize=50, bins="log", mincnt=1,
-                           cmap="Blues", linewidths=0)
+            ax_r.hexbin(mag_r, color_r, gridsize=50, bins="log", mincnt=1,
+                        cmap="Blues", linewidths=0)
         if color_m.size > 0:
-            hist, xedges, yedges = np.histogram2d(mag_m, color_m, bins=(35, 35), range=((18, 28), (-2, 4)))
-            if np.any(hist > 0):
-                xcent = 0.5 * (xedges[:-1] + xedges[1:])
-                ycent = 0.5 * (yedges[:-1] + yedges[1:])
-                levels = np.quantile(hist[hist > 0], [0.5, 0.75, 0.9])
-                ax.contour(xcent, ycent, hist.T, levels=np.unique(levels), colors="#ff7f0e", linewidths=1.5)
+            ax_m.hexbin(mag_m, color_m, gridsize=50, bins="log", mincnt=1,
+                        cmap="Oranges", linewidths=0)
 
-        ax.set_xlabel(f"{FILTER_SHORT[bi]} (mag)")
-        ax.set_ylabel(label)
-        ax.set_title(label)
-        ax.set_ylim(-2, 4)
-        ax.set_xlim(18, 28)
-        legend_els = [
-             Line2D([0], [0], color="#1f77b4", linewidth=6, alpha=0.7, label="Real density"),
-             Line2D([0], [0], color="#ff7f0e", linewidth=2, label="Mock contours"),
-        ]
-        ax.legend(handles=legend_els, loc="upper left")
+        ax_r.set_xlim(18, 28)
+        ax_r.set_ylim(-2, 4)
+        ax_m.set_xlim(18, 28)
+        ax_m.set_ylim(-2, 4)
 
-    for idx in range(n_colors, len(axes)):
-        axes[idx].set_visible(False)
+        ax_r.set_ylabel(label)
+        ax_r.set_title(f"{label} — Real")
+        ax_m.set_title(f"{label} — Mock")
 
-    fig.suptitle("Color diagnostics: real vs mock", fontsize=13, fontweight="bold")
-    plt.tight_layout()
+        if idx == n_colors - 1:
+            ax_r.set_xlabel(f"{FILTER_SHORT[bi]} (mag)")
+            ax_m.set_xlabel(f"{FILTER_SHORT[bi]} (mag)")
+
+    fig.suptitle("Color diagnostics: Real (left) vs Mock (right)", fontsize=13, fontweight="bold")
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
     out = Path(outdir) / "colors.png"
     plt.savefig(out, bbox_inches="tight", dpi=150)
     plt.close()
@@ -694,57 +698,6 @@ def build_parser():
                    help="Second band for 2D color matching; color is band minus this band (default: NISP-Y)")
     p.add_argument("--mock-match-bins", type=int, default=24,
                    help="Number of bins per axis for mock matching (default: 24)")
-
-    # Simulation-calibration options
-    p.add_argument("--use-empirical-z", action="store_true",
-                   help="Use KDE-based empirical redshift prior from COSMOS catalog")
-    p.add_argument("--empirical-z-fits", default="obs/obs_properties/matched_euclid_farmer.fits",
-                   help="FITS catalog path for empirical z KDE (default: matched_euclid_farmer.fits)")
-    p.add_argument("--empirical-z-columns", nargs="+",
-                   default=["lp_zbest", "lp_zBEST", "ez_z_phot", "photoz", "zbest", "z_phot"],
-                   help="Candidate redshift columns for empirical z KDE")
-    p.add_argument("--use-exponential-av", action="store_true",
-                   help="Use Av ~ Exp(scale), clipped to [av-clip-min, av-clip-max]")
-    p.add_argument("--av-scale", type=float, default=0.5,
-                   help="Scale for exponential Av prior (default: 0.5)")
-    p.add_argument("--av-clip-min", type=float, default=0.0,
-                   help="Lower clip for Av prior (default: 0.0)")
-    p.add_argument("--av-clip-max", type=float, default=2.0,
-                   help="Upper clip for Av prior (default: 2.0)")
-    p.add_argument("--use-normal-metallicity", action="store_true",
-                   help="Use metallicity Z ~ N(mu,sigma), clipped to [met-clip-min, met-clip-max]")
-    p.add_argument("--met-mu", type=float, default=-0.5,
-                   help="Mean metallicity [M/H] for normal prior (default: -0.5)")
-    p.add_argument("--met-sigma", type=float, default=0.3,
-                   help="Std metallicity [M/H] for normal prior (default: 0.3)")
-    p.add_argument("--met-clip-min", type=float, default=-1.5,
-                   help="Lower metallicity clip (default: -1.5)")
-    p.add_argument("--met-clip-max", type=float, default=0.3,
-                   help="Upper metallicity clip (default: 0.3)")
-    p.add_argument("--use-schechter-mass", action="store_true",
-                   help="Use Schechter-like stellar-mass prior instead of uniform logM")
-    p.add_argument("--schechter-alpha", type=float, default=-1.3,
-                   help="Schechter faint-end slope alpha (default: -1.3)")
-    p.add_argument("--schechter-logm-star", type=float, default=10.7,
-                   help="Schechter logM* (default: 10.7)")
-    p.add_argument("--use-ssfr-lognormal-prior", action="store_true",
-                   help="Switch to sSFRlognormal prior and use ssfr-min/max")
-    p.add_argument("--ssfr-min", type=float, default=-11.0,
-                   help="Minimum log sSFR for sSFRlognormal mode (default: -11)")
-    p.add_argument("--ssfr-max", type=float, default=-8.0,
-                   help="Maximum log sSFR for sSFRlognormal mode (default: -8)")
-    p.add_argument("--override-sfr-main-sequence", action="store_true",
-                   help="Override simulated SFR with logSFR = a*logM + b + N(0,scatter)")
-    p.add_argument("--ms-slope", type=float, default=0.8,
-                   help="Main-sequence slope a (default: 0.8)")
-    p.add_argument("--ms-intercept", type=float, default=-7.0,
-                   help="Main-sequence intercept b (default: -7.0)")
-    p.add_argument("--ms-scatter", type=float, default=0.3,
-                   help="Main-sequence Gaussian scatter (default: 0.3)")
-    p.add_argument("--ms-sfr-floor", type=float, default=-10.0,
-                   help="Lower clip for overridden logSFR (default: -10)")
-    p.add_argument("--ms-sfr-ceil", type=float, default=None,
-                   help="Optional upper clip for overridden logSFR")
     return p
 
 
@@ -827,6 +780,7 @@ def main():
     print(f"  detect width   = {sx.noise_detection_snr_width}")
     print(f"  corr clip      = [{sx.noise_corr_clip_min}, {sx.noise_corr_clip_max}]")
     print(f"  corr scatter   = {sx.noise_corr_scatter_log}")
+    print(f"  det SNR cut    = {SNR_DETECTION_THRESHOLD}")
 
     np.random.seed(0)
 
@@ -834,7 +788,6 @@ def main():
         print("[1/3] Loading existing simulation...")
         sx.load_simulation()
     else:
-        empirical_z_fits = args.empirical_z_fits if args.empirical_z_fits is not None else fits_path
         print(f"[1/3] Simulating {args.n_sim} galaxy SEDs...")
         sx.simulate(
             mass_min=6.0, mass_max=11.5,
@@ -842,27 +795,6 @@ def main():
             Z_min=-1.7, Z_max=0.3,
             dust_model="Calzetti", dust_prior="flat",
             Av_min=0.0, Av_max=2.5,
-            use_empirical_z=args.use_empirical_z,
-            empirical_z_fits=empirical_z_fits,
-            empirical_z_columns=tuple(args.empirical_z_columns),
-            use_exponential_av=args.use_exponential_av,
-            av_scale=args.av_scale,
-            av_clip=(args.av_clip_min, args.av_clip_max),
-            use_normal_metallicity=args.use_normal_metallicity,
-            metallicity_mu=args.met_mu,
-            metallicity_sigma=args.met_sigma,
-            metallicity_clip=(args.met_clip_min, args.met_clip_max),
-            use_schechter_mass=args.use_schechter_mass,
-            schechter_alpha=args.schechter_alpha,
-            schechter_logm_star=args.schechter_logm_star,
-            use_ssfr_lognormal_prior=args.use_ssfr_lognormal_prior,
-            ssfr_clip=(args.ssfr_min, args.ssfr_max),
-            override_sfr_main_sequence=args.override_sfr_main_sequence,
-            ms_slope=args.ms_slope,
-            ms_intercept=args.ms_intercept,
-            ms_scatter=args.ms_scatter,
-            ms_sfr_floor=args.ms_sfr_floor,
-            ms_sfr_ceil=args.ms_sfr_ceil,
         )
         sx.load_simulation()
 
@@ -956,7 +888,8 @@ def main():
             saved.append(out)
 
         out = plot_detection_fraction_vs_flux(
-            fi, real_data, mock_data, sx.limits, outdir
+            fi, real_data, mock_data, sx.limits, outdir,
+            snr_detection_threshold=SNR_DETECTION_THRESHOLD,
         )
         if out:
             saved.append(out)

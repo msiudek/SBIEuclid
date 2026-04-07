@@ -1,9 +1,9 @@
-"""Generate comparison plots for SBIPIX noise products.
+"""Generate comparison plots for noise products.
 
-Default comparison is north_2fwhm vs north_3fwhm in obs/obs_properties.
+Simple version: compares 2fwhm vs 3fwhm products in this directory.
+Plots are saved in ./plots (created automatically).
 """
 
-import argparse
 import os
 
 import matplotlib.pyplot as plt
@@ -42,15 +42,14 @@ def save_background_plot(labels, bg_a, bg_b, label_a, label_b, out_path):
 
 
 def save_sigma_grid(labels, sigma_a, sigma_b, label_a, label_b, out_path, ylabel, title):
-    n_filters = len(labels)
-    ncols = 4
-    nrows = (n_filters + ncols - 1) // ncols
+    n_filters = 10
     bins = np.arange(sigma_a.shape[1])
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
+    fig, axes = plt.subplots(2, 5, figsize=(20, 6), sharex=True)
+    axes = axes.ravel()
 
-    for idx, band in enumerate(labels):
+    for idx in range(n_filters):
+        band = labels[idx]
         ax = axes[idx]
         ax.plot(bins, sigma_a[idx], "-o", label=label_a)
         ax.plot(bins, sigma_b[idx], "-s", label=label_b)
@@ -58,9 +57,6 @@ def save_sigma_grid(labels, sigma_a, sigma_b, label_a, label_b, out_path, ylabel
         ax.set_xlabel("bin index")
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.3)
-
-    for idx in range(n_filters, len(axes)):
-        axes[idx].axis("off")
 
     axes[0].legend(fontsize=8)
     fig.suptitle(title)
@@ -71,12 +67,10 @@ def save_sigma_grid(labels, sigma_a, sigma_b, label_a, label_b, out_path, ylabel
 
 def save_percentiles_plot(labels, p_a, p_b, label_a, label_b, out_path):
     x = np.arange(len(labels))
-    rows = int(np.ceil(p_a.shape[0] / 3))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 7), sharey=False)
+    axes = axes.ravel()
 
-    fig, axes = plt.subplots(rows, 3, figsize=(16, 3.5 * rows), sharey=False)
-    axes = np.atleast_1d(axes).ravel()
-
-    for idx in range(p_a.shape[0]):
+    for idx in range(6):
         ax = axes[idx]
         ax.plot(x, p_a[idx], "o-", label=label_a)
         ax.plot(x, p_b[idx], "s-", label=label_b)
@@ -86,9 +80,6 @@ def save_percentiles_plot(labels, p_a, p_b, label_a, label_b, out_path):
         ax.set_ylabel("magnitude")
         ax.grid(alpha=0.3)
 
-    for idx in range(p_a.shape[0], len(axes)):
-        axes[idx].axis("off")
-
     axes[0].legend()
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
@@ -96,45 +87,36 @@ def save_percentiles_plot(labels, p_a, p_b, label_a, label_b, out_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate noise comparison plots")
-    parser.add_argument("--base-dir", default="obs/obs_properties",
-                        help="Directory containing noise product .npy files")
-    parser.add_argument("--filter-list", default="filters_to_use.dat",
-                        help="Filter list filename inside --base-dir")
-    parser.add_argument("--prefix-a", default="north_2fwhm",
-                        help="Prefix for first product set")
-    parser.add_argument("--prefix-b", default="north_3fwhm",
-                        help="Prefix for second product set")
-    parser.add_argument("--label-a", default="2fwhm",
-                        help="Legend label for first product set")
-    parser.add_argument("--label-b", default="3fwhm",
-                        help="Legend label for second product set")
-    args = parser.parse_args()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    plots_dir = os.path.join(base_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
 
-    filter_list_path = args.filter_list
-    if not os.path.isabs(filter_list_path):
-        filter_list_path = os.path.join(args.base_dir, filter_list_path)
+    prefix_a = "2fwhm"
+    prefix_b = "3fwhm"
+    label_a = "2fwhm"
+    label_b = "3fwhm"
 
+    filter_list_path = os.path.join(base_dir, "filters_to_use.dat")
     labels = read_filter_labels(filter_list_path)
-    products_a = load_products(args.base_dir, args.prefix_a)
-    products_b = load_products(args.base_dir, args.prefix_b)
+    products_a = load_products(base_dir, prefix_a)
+    products_b = load_products(base_dir, prefix_b)
 
     save_background_plot(
         labels,
         products_a["background"],
         products_b["background"],
-        args.label_a,
-        args.label_b,
-        os.path.join(args.base_dir, "noise_compare_background_2v3fwhm.png"),
+        label_a,
+        label_b,
+        os.path.join(plots_dir, "noise_compare_background_2v3fwhm.png"),
     )
 
     save_sigma_grid(
         labels,
         products_a["mean_sigma"],
         products_b["mean_sigma"],
-        args.label_a,
-        args.label_b,
-        os.path.join(args.base_dir, "noise_compare_mean_sigma_2v3fwhm.png"),
+        label_a,
+        label_b,
+        os.path.join(plots_dir, "noise_compare_mean_sigma_2v3fwhm.png"),
         ylabel="mean sigma [mag]",
         title="Mean sigma per bin",
     )
@@ -143,9 +125,9 @@ def main():
         labels,
         products_a["std_sigma"],
         products_b["std_sigma"],
-        args.label_a,
-        args.label_b,
-        os.path.join(args.base_dir, "noise_compare_std_sigma_2v3fwhm.png"),
+        label_a,
+        label_b,
+        os.path.join(plots_dir, "noise_compare_std_sigma_2v3fwhm.png"),
         ylabel="std sigma [mag]",
         title="Std sigma per bin",
     )
@@ -154,16 +136,16 @@ def main():
         labels,
         products_a["percentiles"],
         products_b["percentiles"],
-        args.label_a,
-        args.label_b,
-        os.path.join(args.base_dir, "noise_compare_percentiles_2v3fwhm.png"),
+        label_a,
+        label_b,
+        os.path.join(plots_dir, "noise_compare_percentiles_2v3fwhm.png"),
     )
 
     print("Generated plots:")
-    print(f"- {os.path.join(args.base_dir, 'noise_compare_background_2v3fwhm.png')}")
-    print(f"- {os.path.join(args.base_dir, 'noise_compare_mean_sigma_2v3fwhm.png')}")
-    print(f"- {os.path.join(args.base_dir, 'noise_compare_std_sigma_2v3fwhm.png')}")
-    print(f"- {os.path.join(args.base_dir, 'noise_compare_percentiles_2v3fwhm.png')}")
+    print(f"- {os.path.join(plots_dir, 'noise_compare_background_2v3fwhm.png')}")
+    print(f"- {os.path.join(plots_dir, 'noise_compare_mean_sigma_2v3fwhm.png')}")
+    print(f"- {os.path.join(plots_dir, 'noise_compare_std_sigma_2v3fwhm.png')}")
+    print(f"- {os.path.join(plots_dir, 'noise_compare_percentiles_2v3fwhm.png')}")
 
 
 if __name__ == "__main__":
