@@ -15,6 +15,14 @@ import dense_basis as db
 from ..utils.sed_utils import sfh_delayed_exponential, convert_to_microjansky
 
 
+def _to_scalar(value):
+    """Convert scalar-like/array-like prior sample to a Python float."""
+    arr = np.asarray(value)
+    if arr.size == 0:
+        raise ValueError("Received empty prior sample")
+    return float(arr.reshape(-1)[0])
+
+
 def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True, 
                              filter_list='filter_list.dat', filt_dir='filters/', 
                              norm_method='median', z_step=0.01, sp=None, 
@@ -111,8 +119,8 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
     for i in tqdm(range(int(N_pregrid)), desc="Generating parametric SEDs"):
         # Sample parameters from priors
         
-        zval = priors.sample_z_prior()
-        massval = priors.sample_mass_prior()
+        zval = _to_scalar(priors.sample_z_prior())
+        massval = _to_scalar(priors.sample_mass_prior())
 
         # Sample τ-delayed SFH parameters
         age_gyr = float(cosmology.age(zval).value)
@@ -126,8 +134,8 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         sfh = sfh / 1e9  # Convert M☉/Gyr -> M☉/yr
 
         # Sample other parameters
-        dust = priors.sample_Av_prior()
-        met = priors.sample_Z_prior()
+        dust = _to_scalar(priors.sample_Av_prior())
+        met = _to_scalar(priors.sample_Z_prior())
         
         # Ensure SFH is valid
         sfh = np.where(np.isnan(sfh) | (sfh < 1e-33), 1.1e-33, sfh)
