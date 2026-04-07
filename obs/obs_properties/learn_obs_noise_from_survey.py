@@ -50,7 +50,7 @@ def compute_lambda_eff(filter_paths):
         valid = np.isfinite(wave) & np.isfinite(trans) & (trans > 0)
         w = wave[valid]
         t = trans[valid]
-        lam_eff.append(np.trapz(w * t, w) / np.trapz(t, w))
+        lam_eff.append(np.trapezoid(w * t, w) / np.trapezoid(t, w))
     return np.array(lam_eff)
 
 
