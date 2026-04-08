@@ -176,6 +176,7 @@ class sbipix():
         self.noise_detection_model = 'hard'
         self.noise_detection_snr_offset = 0.0
         self.noise_detection_snr_width = 1.0
+        self.noise_sigma_mag_params = None
         
         # Observational properties (loaded from files)
         self.mean_sigma_obs = None
@@ -386,6 +387,68 @@ class sbipix():
                 loc=pixel_means,
                 scale=pixel_stds
             )
+
+        if self.noise_sigma_clip_max is not None:
+            mag_errs_det = np.minimum(mag_errs_det, self.noise_sigma_clip_max)
+
+        return mag_errs_det
+
+    def _fit_sigma_mag_lognormal_params(self, filter_idx):
+        """Fit log(sigma) = a + b*mag and scatter for one filter."""
+        centers, means_f = self._compute_bin_centers(filter_idx)
+        means_f = np.asarray(means_f, dtype=float)
+        stds_f = np.asarray(self.stds_sigma_obs[filter_idx], dtype=float)
+
+        valid = np.isfinite(centers) & np.isfinite(means_f) & (means_f > 0)
+        if np.sum(valid) < 2:
+            mean_fallback = np.nanmedian(means_f[np.isfinite(means_f) & (means_f > 0)])
+            if not np.isfinite(mean_fallback) or mean_fallback <= 0:
+                mean_fallback = 0.1
+            a = np.log(mean_fallback)
+            b = 0.0
+            scatter = 0.3
+            return np.array([a, b, scatter], dtype=float)
+
+        x = centers[valid]
+        y = np.log(means_f[valid])
+        b, a = np.polyfit(x, y, 1)
+        resid = y - (a + b * x)
+        scatter_fit = np.nanstd(resid)
+
+        stds_pos = np.isfinite(stds_f[valid]) & (stds_f[valid] > 0)
+        scatter_from_bin_std = np.nan
+        if np.any(stds_pos):
+            ratio = stds_f[valid][stds_pos] / means_f[valid][stds_pos]
+            sigma2_log = np.log1p(np.maximum(ratio, 1e-6) ** 2)
+            scatter_from_bin_std = float(np.nanmedian(np.sqrt(sigma2_log)))
+
+        candidate = np.array([scatter_fit, scatter_from_bin_std], dtype=float)
+        candidate = candidate[np.isfinite(candidate) & (candidate > 0)]
+        if candidate.size == 0:
+            scatter = 0.3
+        else:
+            scatter = float(np.nanmax(candidate))
+        scatter = max(scatter * self.noise_std_scale, 1e-3)
+
+        return np.array([a, b, scatter], dtype=float)
+
+    def _prepare_sigma_mag_lognormal_params(self):
+        """Prepare per-filter [a, b, scatter] for mag-conditioned lognormal sigma."""
+        n_filters = self.mean_sigma_obs.shape[0]
+        params = np.zeros((n_filters, 3), dtype=float)
+        for filter_idx in range(n_filters):
+            params[filter_idx] = self._fit_sigma_mag_lognormal_params(filter_idx)
+        self.noise_sigma_mag_params = params
+
+    def _sample_sigma_mag_lognormal(self, mags_det, filter_idx):
+        """Sample sigma from exp(N(a + b*mag, scatter)) for one filter."""
+        if self.noise_sigma_mag_params is None:
+            self._prepare_sigma_mag_lognormal_params()
+
+        a, b, scatter = self.noise_sigma_mag_params[filter_idx]
+        mags_det = np.asarray(mags_det, dtype=float)
+        mu = a + b * mags_det
+        mag_errs_det = np.random.lognormal(mean=mu, sigma=scatter)
 
         if self.noise_sigma_clip_max is not None:
             mag_errs_det = np.minimum(mag_errs_det, self.noise_sigma_clip_max)
@@ -712,6 +775,8 @@ class sbipix():
             self.percentiles = self.percentiles[:, keep]
             self.limits = self.limits[keep]
 
+        self._prepare_sigma_mag_lognormal_params()
+
         print('Observational features loaded')        
 
 
@@ -884,9 +949,16 @@ class sbipix():
                 use_empirical_sigma = (
                     self.noise_sigma_sampler == 'empirical' and self.sigma_samples_obs is not None
                 )
+                use_mag_lognormal = self.noise_sigma_sampler == 'mag_lognormal'
 
-                if self.noise_bin_interpolation and not use_empirical_sigma:
+                if use_mag_lognormal:
+                    mag_errs_det = np.asarray(
+                        self._sample_sigma_mag_lognormal(mags_valid, filter_idx),
+                        dtype=float,
+                    )
+                elif self.noise_bin_interpolation and not use_empirical_sigma:
                     pixel_means, pixel_stds = self._interpolate_noise_stats(mags_valid, filter_idx)
+                    mag_errs_det = np.asarray(self._sample_sigma_distribution(pixel_means, pixel_stds), dtype=float)
                 else:
                     percentiles_f = self.percentiles[:, filter_idx]
                     bin_indices = np.digitize(mags_valid, percentiles_f)
@@ -899,14 +971,14 @@ class sbipix():
                     pixel_means = self.mean_sigma_obs[filter_idx, bin_indices]
                     pixel_stds = self.stds_sigma_obs[filter_idx, bin_indices]
 
-                # 6. Sample σ values from the configured distribution
-                if use_empirical_sigma:
-                    mag_errs_det = np.asarray(
-                        self._sample_sigma_empirical(filter_idx, bin_indices),
-                        dtype=float,
-                    )
-                else:
-                    mag_errs_det = np.asarray(self._sample_sigma_distribution(pixel_means, pixel_stds), dtype=float)
+                    # 6. Sample σ values from the configured distribution
+                    if use_empirical_sigma:
+                        mag_errs_det = np.asarray(
+                            self._sample_sigma_empirical(filter_idx, bin_indices),
+                            dtype=float,
+                        )
+                    else:
+                        mag_errs_det = np.asarray(self._sample_sigma_distribution(pixel_means, pixel_stds), dtype=float)
 
                 finite_sigma = np.isfinite(mag_errs_det) & (mag_errs_det > 0)
                 if not np.any(finite_sigma):
