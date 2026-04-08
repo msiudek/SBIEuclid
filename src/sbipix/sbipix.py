@@ -447,68 +447,11 @@ class sbipix():
 
         return detected
 
-    def _sample_schechter_logm(self, n_samples, alpha=-1.3, logm_star=10.7,
-                               logm_min=4.0, logm_max=12.0):
-        """Sample log-stellar-masses from a truncated Schechter-like distribution."""
-        n_samples = int(n_samples)
-        if n_samples <= 0:
-            return np.array([], dtype=float)
-
-        grid = np.linspace(logm_min, logm_max, 4096)
-        x = 10.0 ** (grid - logm_star)
-        pdf = np.power(10.0, (alpha + 1.0) * (grid - logm_star)) * np.exp(-x)
-        pdf = np.where(np.isfinite(pdf) & (pdf > 0), pdf, 0.0)
-
-        if not np.any(pdf > 0):
-            return np.random.uniform(logm_min, logm_max, size=n_samples)
-
-        cdf = np.cumsum(pdf)
-        cdf = cdf / cdf[-1]
-        u = np.random.uniform(0.0, 1.0, size=n_samples)
-        return np.interp(u, cdf, grid)
-
-    def _load_empirical_redshift_samples(self, fits_path, z_columns):
-        """Load finite redshift samples from COSMOS-like FITS columns."""
-        from astropy.table import Table
-
-        cat = Table.read(fits_path)
-        for col in z_columns:
-            if col in cat.colnames:
-                vals = np.asarray(cat[col], dtype=float)
-                vals = vals[np.isfinite(vals) & (vals >= 0.0)]
-                if vals.size > 10:
-                    return vals, col
-        raise ValueError(
-            f"No usable redshift column found in {fits_path}. "
-            f"Tried: {list(z_columns)}"
-        )
-
     def simulate(self, mass_max=12, mass_min=4, sfr_prior_type='SFRflat', 
                  sfr_min=-9, sfr_max=2, ssfr_min=-12.0, ssfr_max=-7.5, 
                  z_prior='flat', z_min=0.0, z_max=10.0, Z_min=-2.27, Z_max=0.4, 
                  dust_model='Calzetti', dust_prior='flat', Av_min=0.0, Av_max=3.0, 
-                 tx_alpha=1.0, Nparam=3,
-                 use_empirical_z=False,
-                 empirical_z_fits='obs/obs_properties/COSMOS_DEEP.fits',
-                 empirical_z_columns=('lp_zBEST', 'lp_zbest', 'photoz', 'zbest', 'z_phot'),
-                 use_exponential_av=False,
-                 av_scale=0.5,
-                 av_clip=(0.0, 2.0),
-                 use_normal_metallicity=False,
-                 metallicity_mu=-0.5,
-                 metallicity_sigma=0.3,
-                 metallicity_clip=(-1.5, 0.3),
-                 use_schechter_mass=False,
-                 schechter_alpha=-1.3,
-                 schechter_logm_star=10.7,
-                 use_ssfr_lognormal_prior=False,
-                 ssfr_clip=(-11.0, -8.0),
-                 override_sfr_main_sequence=False,
-                 ms_slope=0.8,
-                 ms_intercept=-7.0,
-                 ms_scatter=0.3,
-                 ms_sfr_floor=-10.0,
-                 ms_sfr_ceil=None):
+                 tx_alpha=1.0, Nparam=3):
         """
         Simulate a galaxy population using specified priors.
 
@@ -582,94 +525,6 @@ class sbipix():
         priors.tx_alpha = tx_alpha
         priors.Nparam = Nparam
 
-        if use_ssfr_lognormal_prior:
-            priors.sfr_prior_type = 'sSFRlognormal'
-            priors.ssfr_min = float(ssfr_clip[0])
-            priors.ssfr_max = float(ssfr_clip[1])
-            priors.sfr_min = min(priors.sfr_min, float(ms_sfr_floor))
-            print(
-                f"Using sSFRlognormal prior with ssfr range "
-                f"[{priors.ssfr_min}, {priors.ssfr_max}]"
-            )
-
-        if use_schechter_mass:
-            def _sample_mass_prior_custom():
-                return float(self._sample_schechter_logm(
-                    1,
-                    alpha=schechter_alpha,
-                    logm_star=schechter_logm_star,
-                    logm_min=mass_min,
-                    logm_max=mass_max,
-                )[0])
-
-            priors.sample_mass_prior = _sample_mass_prior_custom
-            print(
-                f"Using Schechter-like mass prior: alpha={schechter_alpha}, "
-                f"logM*={schechter_logm_star}, range=[{mass_min}, {mass_max}]"
-            )
-
-        if use_exponential_av:
-            av_lo = float(av_clip[0])
-            av_hi = float(av_clip[1])
-            priors.Av_min = av_lo
-            priors.Av_max = av_hi
-            priors.dust_prior = 'custom'
-
-            def _sample_Av_prior_custom():
-                draw = np.random.exponential(scale=float(av_scale))
-                return np.array([np.clip(draw, av_lo, av_hi)], dtype=float)
-
-            priors.sample_Av_prior = _sample_Av_prior_custom
-            print(f"Using exponential Av prior: scale={av_scale}, clip=[{av_lo}, {av_hi}]")
-
-        if use_normal_metallicity:
-            zmet_lo = float(metallicity_clip[0])
-            zmet_hi = float(metallicity_clip[1])
-            priors.Z_min = zmet_lo
-            priors.Z_max = zmet_hi
-
-            def _sample_Z_prior_custom():
-                draw = np.random.normal(loc=float(metallicity_mu), scale=float(metallicity_sigma))
-                return np.array([np.clip(draw, zmet_lo, zmet_hi)], dtype=float)
-
-            priors.sample_Z_prior = _sample_Z_prior_custom
-            print(
-                f"Using normal metallicity prior: mu={metallicity_mu}, sigma={metallicity_sigma}, "
-                f"clip=[{zmet_lo}, {zmet_hi}]"
-            )
-
-        if use_empirical_z:
-            fits_path = empirical_z_fits
-            if not os.path.isabs(fits_path):
-                fits_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', fits_path))
-
-            z_samples, z_col = self._load_empirical_redshift_samples(fits_path, empirical_z_columns)
-            kde = stats.gaussian_kde(z_samples)
-
-            priors.z_prior = 'custom'
-
-            def _sample_z_prior_custom():
-                for _ in range(32):
-                    draw = float(kde.resample(1).flatten()[0])
-                    if np.isfinite(draw) and (z_min <= draw <= z_max):
-                        return np.array([draw], dtype=float)
-                draw = float(np.random.choice(z_samples))
-                draw = float(np.clip(draw, z_min, z_max))
-                return np.array([draw], dtype=float)
-
-            priors.sample_z_prior = _sample_z_prior_custom
-            print(
-                f"Using empirical z KDE prior from column '{z_col}' "
-                f"({len(z_samples)} samples), clipped to [{z_min}, {z_max}]"
-            )
-
-        self._override_sfr_main_sequence = bool(override_sfr_main_sequence)
-        self._ms_slope = float(ms_slope)
-        self._ms_intercept = float(ms_intercept)
-        self._ms_scatter = float(ms_scatter)
-        self._ms_sfr_floor = float(ms_sfr_floor)
-        self._ms_sfr_ceil = None if ms_sfr_ceil is None else float(ms_sfr_ceil)
-
         # Generate atlas based on SFH type
         if self.parametric:
             print("Generating parametric (τ-delayed) SFH atlas...")
@@ -717,8 +572,15 @@ class sbipix():
         )
         
         # Extract SEDs and convert to magnitudes
-        zs = atlas['zval']
         atlas_seds = atlas['sed']
+
+        def _as_1d(arr):
+            arr = np.asarray(arr)
+            if arr.ndim == 0:
+                return np.array([arr.item()])
+            if arr.ndim == 1:
+                return arr
+            return arr[:, 0]
         
         # Apply filter removal if specified
         if self.remove_filters is not None:
@@ -727,19 +589,20 @@ class sbipix():
         
         # Convert from microJy to AB magnitudes
         obs = -2.5 * np.log10(atlas_seds * 1e-6 / 3631)
+        n_loaded = obs.shape[0]
 
         # Extract parameters based on SFH type
         if self.parametric:
             sfhs = atlas['sfh_tuple']
-            theta = np.zeros((self.n_simulation, 8))
+            theta = np.zeros((n_loaded, 8))
             theta[:, 0] = sfhs[:, 0]  # M* (surviving)
             theta[:, 1] = sfhs[:, 1]  # M* (formed)
             theta[:, 2] = sfhs[:, 2]  # SFR
             theta[:, 3] = sfhs[:, 3]  # τ
             theta[:, 4] = sfhs[:, 4]  # t_i
-            theta[:, 5] = atlas['met'][:, 0]  # [M/H]
-            theta[:, 6] = atlas['dust'][:, 0]  # A_V
-            theta[:, 7] = atlas['zval'][:, 0]  # z
+            theta[:, 5] = _as_1d(atlas['met'])  # [M/H]
+            theta[:, 6] = _as_1d(atlas['dust'])  # A_V
+            theta[:, 7] = _as_1d(atlas['zval'])  # z
             
             self.labels = [
                 'log($\\rm{M}_{*}/\\rm{M}_{\\odot}$)',
@@ -750,17 +613,17 @@ class sbipix():
             ]
         else:
             # Dirichlet SFH parameters
-            theta = np.zeros((self.n_simulation, 8))
+            theta = np.zeros((n_loaded, 8))
             sfhs = atlas['sfh_tuple_rec']
-            sfhs = np.reshape(sfhs, (self.n_simulation, 6))
+            sfhs = np.reshape(sfhs, (n_loaded, 6))
             theta[:, 0] = sfhs[:, 0]  # M* (surviving)
             theta[:, 1] = sfhs[:, 1]  # SFR
             theta[:, 2] = sfhs[:, 3]  # t_25%
             theta[:, 3] = sfhs[:, 4]  # t_50%
             theta[:, 4] = sfhs[:, 5]  # t_75%
-            theta[:, 5] = atlas['met'][:, 0]  # [M/H]
-            theta[:, 6] = atlas['dust'][:, 0]  # A_V
-            theta[:, 7] = atlas['zval'][:, 0]  # z
+            theta[:, 5] = _as_1d(atlas['met'])  # [M/H]
+            theta[:, 6] = _as_1d(atlas['dust'])  # A_V
+            theta[:, 7] = _as_1d(atlas['zval'])  # z
 
             # Add formed stellar mass if requested
             if self.both_masses:
@@ -768,24 +631,6 @@ class sbipix():
 
         self.obs = obs
         self.theta = theta
-
-        if getattr(self, '_override_sfr_main_sequence', False):
-            logm = self.theta[:, 0]
-            zvals = np.clip(np.asarray(self.theta[:, -1], dtype=float), 0.0, None)
-            log_sfr = (
-                self._ms_slope * logm
-                + self._ms_intercept
-                + 0.5 * np.log10(1.0 + zvals)
-                + np.random.normal(0.0, self._ms_scatter, size=len(logm))
-            )
-            log_sfr = np.maximum(log_sfr, self._ms_sfr_floor)
-            if self._ms_sfr_ceil is not None:
-                log_sfr = np.minimum(log_sfr, self._ms_sfr_ceil)
-            self.theta[:, 1] = log_sfr
-            print(
-                f"Applied main-sequence SFR override: logSFR = {self._ms_slope}*logM + "
-                f"{self._ms_intercept} + 0.5*log10(1+z) + N(0,{self._ms_scatter})"
-            )
 
         return obs, theta
     
