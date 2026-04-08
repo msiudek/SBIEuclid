@@ -671,8 +671,10 @@ def build_parser():
     p.add_argument("--noise-prefix", default="north_3fwhm",
                    choices=["north_2fwhm", "north_3fwhm"],
                    help="Noise-product prefix to use from obs_properties (default: north_3fwhm)")
-    p.add_argument("--limits-file", default=None,
-                   help="Optional custom limits file in obs_properties (e.g. background_noise_north_2fwhm_5sigma.npy)")
+    p.add_argument("--limits-override", default=None, dest="limits_file",
+                   help="Override the default limits file (default: background_noise_<noise-prefix>.npy "
+                        "from obs_properties). Only needed for non-standard depth files, e.g. "
+                        "background_noise_north_2fwhm_5sigma.npy")
     p.add_argument("--n-sim", type=int, default=10000,
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
     p.add_argument("--outdir", default="sbi-logs/validate",
