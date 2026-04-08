@@ -1,10 +1,11 @@
-FILTERS_EUCLID/Euclid_NISP.H.dat
-FILTERS_EUCLID/Euclid_NISP.J.dat
-FILTERS_EUCLID/Euclid_NISP.Y.dat
-FILTERS_EUCLID/Euclid_VIS.vis.dat
-FILTERS_HSC/Subaru_HSC.g.dat
-FILTERS_HSC/Subaru_HSC.z.dat
-FILTERS_DECam/CTIO_DECam.g.dat
-FILTERS_DECam/CTIO_DECam.r.dat
-FILTERS_DECam/CTIO_DECam.i.dat
-FILTERS_DECam/CTIO_DECam.z.dat
+# filter_rel_path                       short_name   col_stem
+FILTERS_EUCLID/Euclid_NISP.H.dat        NISP-H       h
+FILTERS_EUCLID/Euclid_NISP.J.dat        NISP-J       j
+FILTERS_EUCLID/Euclid_NISP.Y.dat        NISP-Y       y
+FILTERS_EUCLID/Euclid_VIS.vis.dat       VIS          vis
+FILTERS_HSC/Subaru_HSC.g.dat            HSC-g        g_ext_hsc
+FILTERS_HSC/Subaru_HSC.z.dat            HSC-z        z_ext_hsc
+FILTERS_DECam/CTIO_DECam.g.dat          DECam-g      g_ext_decam
+FILTERS_DECam/CTIO_DECam.r.dat          DECam-r      r_ext_decam
+FILTERS_DECam/CTIO_DECam.i.dat          DECam-i      i_ext_decam
+FILTERS_DECam/CTIO_DECam.z.dat          DECam-z      z_ext_decam

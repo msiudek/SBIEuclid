@@ -30,18 +30,37 @@ import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------------
-# Filter metadata — keep in sync with filters_to_use.dat (10 filters)
+# Filter metadata — loaded from the single source of truth: filters_to_use.dat
+# (3-column format: filter_rel_path  short_name  col_stem)
 # ---------------------------------------------------------------------------
-FILTER_SHORT = ["NISP-H", "NISP-J", "NISP-Y", "VIS",
-                "HSC-g", "HSC-z",
-                "DECam-g", "DECam-r", "DECam-i", "DECam-z"]
+_OBS_DIR = Path(__file__).resolve().parents[1] / "obs" / "obs_properties"
 
-# FITS column stems (same as FILTER_STEM_TO_COL in learn_obs_noise script)
-FILTER_COL_STEMS = ["h", "j", "y", "vis",
-                    "g_ext_hsc", "z_ext_hsc",
-                    "g_ext_decam", "r_ext_decam", "i_ext_decam", "z_ext_decam"]
+
+def _load_filter_metadata(dat_file):
+    """Parse filters_to_use.dat — 3 columns: filter_rel_path  short_name  col_stem."""
+    entries = []
+    with open(dat_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) != 3:
+                raise ValueError(
+                    f"filters_to_use.dat: expected 3 columns, got {len(parts)}: {line!r}"
+                )
+            entries.append({"path": parts[0], "short": parts[1], "col_stem": parts[2]})
+    return entries
+
+
+_FILTER_META = _load_filter_metadata(_OBS_DIR / "filters_to_use.dat")
+FILTER_SHORT     = [m["short"]    for m in _FILTER_META]
+FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
 
 # Colors to plot: (band_a_idx, band_b_idx, label)
+# Indices are 0-based positions in filters_to_use.dat (fixed order):
+#   0=NISP-H  1=NISP-J  2=NISP-Y  3=VIS  4=HSC-g  5=HSC-z
+#   6=DECam-g 7=DECam-r 8=DECam-i 9=DECam-z
 COLOR_PAIRS = [
     (3, 2, "VIS - Y"),
     (2, 1, "Y - J"),

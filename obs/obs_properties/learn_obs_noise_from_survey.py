@@ -16,35 +16,40 @@ PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
 PATCH_ID = 98
 SNR_THRESHOLD = 2.0
 
-FILTER_STEM_TO_COL = {
-    "CFHT_MegaCam.r":    "r_ext_megacam",
-    "CFHT_MegaCam.u":    "u_ext_megacam",
-    "Euclid_NISP.H":     "h",
-    "Euclid_NISP.J":     "j",
-    "Euclid_NISP.Y":     "y",
-    "Euclid_VIS.vis":    "vis",
-    "Subaru_HSC.g":      "g_ext_hsc",
-    "Subaru_HSC.z":      "z_ext_hsc",
-    "PAN-STARRS_PS1.i":  "i_ext_panstarrs",
-    "CTIO_DECam.g":      "g_ext_decam",
-    "CTIO_DECam.r":      "r_ext_decam",
-    "CTIO_DECam.i":      "i_ext_decam",
-    "CTIO_DECam.z":      "z_ext_decam",
-}
+def load_filter_metadata(filter_list_file, filt_dir):
+    """
+    Parse filters_to_use.dat — each non-comment line must have 3 whitespace-
+    separated fields:  filter_rel_path  short_name  col_stem
 
-
-def load_filter_paths(filter_list_file, filt_dir):
-    """Load filter file paths from list."""
+    Returns a list of dicts with keys: path (absolute), rel_path, short, col_stem.
+    """
+    entries = []
     with open(os.path.join(filt_dir, filter_list_file)) as f:
-        lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-    return [os.path.join(filt_dir, line) for line in lines]
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) != 3:
+                raise ValueError(
+                    f"{filter_list_file}: expected 3 columns (path short col_stem), "
+                    f"got {len(parts)} in: {line!r}"
+                )
+            rel_path, short, col_stem = parts
+            entries.append({
+                "path": os.path.join(filt_dir, rel_path),
+                "rel_path": rel_path,
+                "short": short,
+                "col_stem": col_stem,
+            })
+    return entries
 
 
-def compute_lambda_eff(filter_paths):
+def compute_lambda_eff(entries):
     """Compute effective wavelength per filter (Angstrom)."""
     lam_eff = []
-    for path in filter_paths:
-        data = np.loadtxt(path)
+    for entry in entries:
+        data = np.loadtxt(entry["path"])
         wave = data[:, 0]
         trans = data[:, 1]
         valid = np.isfinite(wave) & np.isfinite(trans) & (trans > 0)
@@ -54,13 +59,7 @@ def compute_lambda_eff(filter_paths):
     return np.array(lam_eff)
 
 
-def extract_filter_stem(filter_path):
-    """'FILTERS_CFHT/CFHT_MegaCam.r.dat' → 'CFHT_MegaCam.r'"""
-    basename = os.path.basename(filter_path)
-    return os.path.splitext(basename)[0]
-
-
-def load_from_fits(fits_path, filter_rel_paths, aperture, patch_id=98):
+def load_from_fits(fits_path, entries, aperture, patch_id=98):
     """Load photometry and errors from COSMOS-Deep FITS for one aperture."""
     cat = Table.read(fits_path)
     print(f"Total rows: {len(cat)}")
@@ -83,9 +82,8 @@ def load_from_fits(fits_path, filter_rel_paths, aperture, patch_id=98):
     phot_list = []
     err_list = []
 
-    for rel_path in filter_rel_paths:
-        stem = extract_filter_stem(rel_path)
-        col_stem = FILTER_STEM_TO_COL[stem]
+    for entry in entries:
+        col_stem = entry["col_stem"]
 
         fcol = f"flux_{col_stem}_{aperture}_aper"
         ecol = f"fluxerr_{col_stem}_{aperture}_aper"
@@ -189,15 +187,15 @@ def main():
     print("NOISE FEATURE COMPUTATION")
     print("=" * 60)
 
-    # Load filter transmission curves
-    print("\n1. Loading filter curves...")
-    filter_paths = load_filter_paths(FILTER_LIST_FILE, FILTER_DIR)
-    n_filters = len(filter_paths)
-    print(f"   {n_filters} filters loaded")
+    # Load filter metadata (path, short name, FITS col_stem) from .dat file
+    print("\n1. Loading filter metadata...")
+    entries = load_filter_metadata(FILTER_LIST_FILE, FILTER_DIR)
+    n_filters = len(entries)
+    print(f"   {n_filters} filters: {', '.join(e['short'] for e in entries)}")
 
     # Compute effective wavelengths
     print("\n2. Computing effective wavelengths...")
-    lam_eff = compute_lambda_eff(filter_paths)
+    lam_eff = compute_lambda_eff(entries)
     print(f"   lam_eff shape: {lam_eff.shape}")
     print(f"   SNR threshold for detections: {SNR_THRESHOLD}")
 
@@ -205,15 +203,11 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"\n3. Output directory: {os.path.abspath(OUT_DIR)}")
 
-    # Build ordered filter list entries
-    filter_rel_paths = [line.strip() for line in open(FILTER_LIST_FILE)
-                        if line.strip() and not line.startswith("#")]
-
     # Process each aperture independently and write separate files
     for aperture in APERTURES:
         prefix = f"{HEMISPHERE}_{aperture}"
         print(f"\n4. Processing aperture: {aperture}")
-        phot, err = load_from_fits(FITS_PATH, filter_rel_paths, aperture, PATCH_ID)
+        phot, err = load_from_fits(FITS_PATH, entries, aperture, PATCH_ID)
 
         percentiles, mean_sigma, std_sigma, sigma_samples = compute_noise_features(
             phot, err, PERCENTILE_CUTS, SNR_THRESHOLD
