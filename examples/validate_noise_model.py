@@ -115,6 +115,15 @@ def band_to_index(band_name):
     return lookup[key]
 
 
+def optional_float(value):
+    """Argparse float parser that also accepts 'none' to mean Python None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() == "none":
+        return None
+    return float(value)
+
+
 def slice_filter_major(data, mask):
     """Apply an object mask to all filter-major arrays in a dict."""
     out = {}
@@ -681,14 +690,14 @@ def build_parser():
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", action="store_true",
                    help="Skip simulation step; load existing atlas instead")
-    p.add_argument("--std-scale", type=float, default=1.2,
-                   help="Multiply sigma std by this factor before sampling (default: 1.2)")
+    p.add_argument("--std-scale", type=optional_float, default=1.2,
+                   help="Multiply sigma std by this factor before sampling (default: 1.2; pass 'none' to keep sbipix default)")
     p.add_argument("--smooth-bins", action="store_true",
                    help="Interpolate sigma statistics between bins instead of hard digitize")
     p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal"], default="empirical",
                    help="Distribution used to sample sigma values (default: empirical)")
-    p.add_argument("--sigma-clip-max", type=float, default=0.8,
-                   help="Clip sampled sigma values above this threshold in mag for non-empirical samplers (default: 0.8)")
+    p.add_argument("--sigma-clip-max", type=optional_float, default=0.8,
+                   help="Clip sampled sigma values above this threshold in mag (default: 0.8; pass 'none' to disable clipping)")
     p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="sigma_mag",
                    help="Noise model: classic sigma(mag) or depth-corrected flux model (default: sigma_mag)")
     p.add_argument("--depth-nsigma", type=float, default=1.0,
