@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import csv
 import os
 from pathlib import Path
 
@@ -249,6 +250,29 @@ def compute_detection_fraction(x, detected, bins, min_count=25):
         frac = np.where(total >= min_count, det / total, np.nan)
     centers = 0.5 * (bins[:-1] + bins[1:])
     return centers, frac, total
+
+
+def dump_sigma_mag_params(sx, filter_short, outdir):
+    """Dump fitted log(sigma)=a+b*mag parameters for each band to CSV."""
+    params = getattr(sx, "noise_sigma_mag_params", None)
+    if params is None:
+        print("No sigma-mag parameters available to dump.")
+        return None
+
+    out = Path(outdir) / "sigma_mag_params.csv"
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["band", "a", "b", "scatter"])
+        for i, band in enumerate(filter_short):
+            a, b, scatter = params[i]
+            writer.writerow([band, f"{a:.8g}", f"{b:.8g}", f"{scatter:.8g}"])
+
+    print("Fitted sigma-mag params (log(sigma)=a+b*mag):")
+    for i, band in enumerate(filter_short):
+        a, b, scatter = params[i]
+        print(f"  {band:>10s}: a={a:+.4f}, b={b:+.4f}, scatter={scatter:.4f}")
+    print(f"  saved: {out}")
+    return out
 
 
 def load_real_data(fits_path, patch_id=98, aperture="3fwhm", snr_min=SNR_DETECTION_THRESHOLD):
@@ -694,8 +718,8 @@ def build_parser():
                    help="Multiply sigma std by this factor before sampling (default: 1.2; pass 'none' to keep sbipix default)")
     p.add_argument("--smooth-bins", action="store_true",
                    help="Interpolate sigma statistics between bins instead of hard digitize")
-    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal"], default="empirical",
-                   help="Distribution used to sample sigma values (default: empirical)")
+    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal", "mag_lognormal"], default="empirical",
+                   help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
     p.add_argument("--sigma-clip-max", type=optional_float, default=0.8,
                    help="Clip sampled sigma values above this threshold in mag (default: 0.8; pass 'none' to disable clipping)")
     p.add_argument("--noise-model", choices=["sigma_mag", "depth_corrected"], default="sigma_mag",
@@ -832,6 +856,8 @@ def main():
 
     print("[2/3] Applying observational realism...")
     sx.load_obs_features()
+    if args.sigma_sampler == "mag_lognormal":
+        dump_sigma_mag_params(sx, FILTER_SHORT, outdir)
     sx.add_noise_nan_limit_all()
 
     # Clean up NaN thetas
