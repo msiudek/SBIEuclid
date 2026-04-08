@@ -231,6 +231,35 @@ class sbipix():
         except OSError:
             pass
 
+    def _prepare_dense_basis_filter_list(self):
+        """
+        Build a dense_basis-compatible one-column filter-list file.
+
+        Our project filter list may be multi-column (e.g., path, short name,
+        col_stem). dense_basis expects a plain one-column list of filter paths.
+        This method writes a temporary one-column file in self.filter_path and
+        returns its filename (basename), suitable for dense_basis fkit_name.
+        """
+        src_path = self._resolve_filter_list_path()
+        out_name = "_dense_basis_filter_list.dat"
+        out_path = os.path.join(self.filter_path, out_name)
+
+        with open(src_path, 'r', encoding='utf-8') as src:
+            lines = src.readlines()
+
+        one_col = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            # First token is always the relative filter transmission path.
+            one_col.append(stripped.split()[0])
+
+        with open(out_path, 'w', encoding='utf-8') as out:
+            out.write("\n".join(one_col) + "\n")
+
+        return out_name
+
     def configure_filters(self, filter_list=None, filter_path=None,
                           mean_sigma_file=None, std_sigma_file=None,
                           sigma_samples_file=None,
@@ -503,6 +532,7 @@ class sbipix():
         import dense_basis as db
 
         self.refresh_filter_metadata()
+        dense_basis_filter_list = self._prepare_dense_basis_filter_list()
         
         # Set up priors
         priors = db.Priors()
@@ -531,7 +561,7 @@ class sbipix():
             generate_atlas_parametric(
                 priors, N_pregrid=self.n_simulation,
                 fname=self.atlas_name, store=True, path=self.atlas_path,
-                filter_list=self.filter_list, filt_dir=self.filter_path, 
+                filter_list=dense_basis_filter_list, filt_dir=self.filter_path, 
                 norm_method='none'
             )
         else:
@@ -539,7 +569,7 @@ class sbipix():
             db.generate_atlas(
                 N_pregrid=self.n_simulation, priors=priors,
                 fname=self.atlas_name, store=True, path=self.atlas_path,
-                filter_list=self.filter_list, filt_dir=self.filter_path, 
+                filter_list=dense_basis_filter_list, filt_dir=self.filter_path, 
                 norm_method='none'
             )
 
