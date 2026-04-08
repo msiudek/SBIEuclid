@@ -821,10 +821,12 @@ def main():
         print(f"[1/3] Simulating {args.n_sim} galaxy SEDs...")
         sx.simulate(
             mass_min=6.0, mass_max=11.5,
-            z_prior="flat", z_min=0.1, z_max=3.0,
-            Z_min=-1.7, Z_max=0.3,
-            dust_model="Calzetti", dust_prior="flat",
-            Av_min=0.0, Av_max=2.5,
+            sfr_prior_type="sSFRlognormal", ssfr_min=-11.0, ssfr_max=-8.0,
+            z_prior="exp", z_min=0.0, z_max=5.0,
+            Z_min=-1.2, Z_max=0.3,
+            dust_model="Calzetti", dust_prior="exp",
+            Av_min=0.0, Av_max=2.0,
+            tx_alpha=2.0,
         )
         sx.load_simulation()
 
