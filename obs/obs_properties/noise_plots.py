@@ -11,9 +11,16 @@ import numpy as np
 
 
 def read_filter_labels(filter_list_path):
+    """Read short filter names (col 2) from 3-column filters_to_use.dat."""
+    labels = []
     with open(filter_list_path, "r", encoding="utf-8") as f:
-        rel = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-    return [os.path.splitext(os.path.basename(path))[0] for path in rel]
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            labels.append(parts[1] if len(parts) >= 2 else parts[0])
+    return labels
 
 
 def load_products(base_dir, prefix):
@@ -91,10 +98,10 @@ def main():
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
-    prefix_a = "2fwhm"
-    prefix_b = "3fwhm"
-    label_a = "2fwhm"
-    label_b = "3fwhm"
+    prefix_a = "north_2fwhm"
+    prefix_b = "north_3fwhm"
+    label_a = "north_2fwhm"
+    label_b = "north_3fwhm"
 
     filter_list_path = os.path.join(base_dir, "filters_to_use.dat")
     labels = read_filter_labels(filter_list_path)

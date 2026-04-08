@@ -4,6 +4,9 @@ import numpy as np
 from astropy.table import Table
 import os
 
+# NumPy <2.0 uses trapz; >=2.0 uses trapezoid
+_trapezoid = getattr(np, "trapezoid", np.trapz)
+
 # Hard-coded configuration
 FITS_PATH = "COSMOS_DEEP.fits"
 FILTER_LIST_FILE = "filters_to_use.dat"
@@ -17,12 +20,7 @@ PATCH_ID = 98
 SNR_THRESHOLD = 2.0
 
 def load_filter_metadata(filter_list_file, filt_dir):
-    """
-    Parse filters_to_use.dat — each non-comment line must have 3 whitespace-
-    separated fields:  filter_rel_path  short_name  col_stem
-
-    Returns a list of dicts with keys: path (absolute), rel_path, short, col_stem.
-    """
+    """Load filter metadata from .dat file. Returns list of dicts with keys:"""
     entries = []
     with open(os.path.join(filt_dir, filter_list_file)) as f:
         for line in f:
@@ -55,7 +53,7 @@ def compute_lambda_eff(entries):
         valid = np.isfinite(wave) & np.isfinite(trans) & (trans > 0)
         w = wave[valid]
         t = trans[valid]
-        lam_eff.append(np.trapezoid(w * t, w) / np.trapezoid(t, w))
+        lam_eff.append(_trapezoid(w * t, w) / _trapezoid(t, w))
     return np.array(lam_eff)
 
 
