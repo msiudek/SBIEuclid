@@ -23,6 +23,7 @@ import argparse
 import csv
 import os
 from pathlib import Path
+import sys
 
 import numpy as np
 import matplotlib
@@ -779,6 +780,10 @@ def main():
     # ------------------------------------------------------------------
     # Build mock catalogue via sbipix
     # ------------------------------------------------------------------
+    src_dir = project_root / "src"
+    if src_dir.exists() and str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
     from sbipix import sbipix
     import numpy as np
 
@@ -819,6 +824,12 @@ def main():
         corr_clip_max=args.corr_clip_max,
         corr_scatter_log=args.corr_scatter_log,
     )
+
+    if args.sigma_sampler == "mag_lognormal" and not hasattr(sx, "_sample_sigma_mag_lognormal"):
+        raise RuntimeError(
+            "Requested --sigma-sampler mag_lognormal, but loaded sbipix does not support it. "
+            "Ensure you run from this repo and that local src/ is used (or reinstall package in editable mode)."
+        )
 
     print("Noise-model settings:")
     print(f"  mode           = {sx.noise_model}")
