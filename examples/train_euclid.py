@@ -67,7 +67,7 @@ OBS_DIR = PROJECT_ROOT / "obs" / "obs_properties"
 LIB_DIR = PROJECT_ROOT / "library"
 
 ATLAS_NAME  = "atlas_obs_euclid_north_validate"
-MODEL_NAME  = "model_euclid_v1.0.pkl"
+MODEL_NAME  = "model_euclid_v1.1.pkl"
 
 NOISE_PREFIX = "north_2fwhm"
 
