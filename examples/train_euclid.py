@@ -106,6 +106,7 @@ phys_ok = (sx.theta[:, 0] > 4.0) & (sx.theta[:, 0] < 13.0) & \
 sx.theta = sx.theta[phys_ok]
 sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
+sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -30 to 5)")
 
 
@@ -121,6 +122,7 @@ SFR_IDX  = 2
 
 sx.theta  = sx.theta[:, [MASS_IDX, SFR_IDX]]
 sx.labels = ["logM", "logSFR"]
+sx.n_simulation = len(sx.theta)
 
 print(f"    Using columns: logM={MASS_IDX}, logSFR={SFR_IDX}")
 
