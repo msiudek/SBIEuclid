@@ -20,7 +20,7 @@ Usage:
         --aperture 2fwhm \
         --outdir sbi-logs/validate_sSFRlogNormal_v5.0 \
         --detection-model hard \
-        --mock-match vis1d \
+        --mock-match vis_yj2d \
         --sigma-sampler mag_lognormal \
         2>&1 | tee sbi-logs/validate_v5.0.log
 """
@@ -45,11 +45,14 @@ from sbipix.utils.validation_plots import (
     plot_sigma_distribution,
     plot_colors,
     plot_sigma_vs_mag_grid,
+    plot_intrinsic_color_color,
+    plot_intrinsic_color_vs_parameters,
 )
 from sbipix.plotting.diagnostics import plot_theta
 
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.stats import ks_2samp
 
 
 # ---------------------------------------------------------------------------
@@ -106,44 +109,71 @@ SIMULATION_CONFIG = {
 # ---------------------------------------------------------------------------
 
 
-def _ratio_weights(real_hist, mock_hist):
-    """Return histogram-ratio weights using normalized frequencies."""
-    real_hist = np.asarray(real_hist, dtype=float)
-    mock_hist = np.asarray(mock_hist, dtype=float)
-    real_total = real_hist.sum()
-    mock_total = mock_hist.sum()
-    if real_total <= 0 or mock_total <= 0:
-        return np.zeros_like(mock_hist, dtype=float)
-    real_pdf = real_hist / real_total
-    mock_pdf = mock_hist / mock_total
-    weights = np.zeros_like(mock_pdf, dtype=float)
-    valid = mock_pdf > 0
-    weights[valid] = real_pdf[valid] / mock_pdf[valid]
-    return weights
-
-
 def compute_mock_match_weights(real_data, mock_data):
-    """Compute per-mock-object weights from the 1D VIS magnitude histogram."""
+    """Compute per-mock-object weights from the 2D joint (VIS mag, Y-J color) histogram.
+
+    Matching on the joint distribution P(m_VIS, Y-J) captures both the overall
+    brightness distribution and the color-redshift locus simultaneously.
+    """
     n_mock = mock_data["mag"].shape[1]
-    weights = np.ones(n_mock, dtype=float)
+    weights = np.zeros(n_mock, dtype=float)
 
-    band_idx = FILTER_SHORT.index("VIS")
-    real_band = real_data["mag"][band_idx]
-    mock_band = mock_data["mag"][band_idx]
-    real_band_ok = np.isfinite(real_band)
-    mock_band_ok = np.isfinite(mock_band) & (mock_band < NONDET_MAG - 0.5)
+    vis_idx = FILTER_SHORT.index("VIS")
+    y_idx   = FILTER_SHORT.index("NISP-Y")
+    j_idx   = FILTER_SHORT.index("NISP-J")
 
-    bins_mag = np.linspace(MAG_BRIGHT, MAG_FAINT, 25)
-    real_hist, _ = np.histogram(real_band[real_band_ok], bins=bins_mag)
-    mock_hist, _ = np.histogram(mock_band[mock_band_ok], bins=bins_mag)
-    bin_weights = _ratio_weights(real_hist, mock_hist)
-    bin_idx = np.digitize(mock_band, bins_mag) - 1
-    in_range = mock_band_ok & (bin_idx >= 0) & (bin_idx < len(bin_weights))
-    weights[:] = 0.0
-    weights[in_range] = bin_weights[bin_idx[in_range]]
+    # --- real ---
+    real_vis = real_data["mag"][vis_idx]
+    real_yj  = real_data["mag"][y_idx] - real_data["mag"][j_idx]
+    real_ok  = (np.isfinite(real_vis) & np.isfinite(real_yj))
+
+    # --- mock ---
+    mock_vis = mock_data["mag"][vis_idx]
+    mock_yj  = mock_data["mag"][y_idx] - mock_data["mag"][j_idx]
+    mock_ok  = (
+        np.isfinite(mock_vis) & (mock_vis < NONDET_MAG - 0.5)
+        & np.isfinite(mock_yj)
+    )
+
+    bins_mag = np.linspace(MAG_BRIGHT, MAG_FAINT, 25)   # 24 VIS-mag bins
+
+    # data-driven Y-J color range from real objects
+    if real_ok.sum() > 0:
+        p1, p99 = np.nanpercentile(real_yj[real_ok], [1, 99])
+        bins_color = np.linspace(p1 - 0.5, p99 + 0.5, 25)   # 24 color bins
+    else:
+        bins_color = np.linspace(-2.0, 4.0, 25)
+
+    real_hist, _, _ = np.histogram2d(
+        real_vis[real_ok], real_yj[real_ok], bins=[bins_mag, bins_color]
+    )
+    mock_hist, _, _ = np.histogram2d(
+        mock_vis[mock_ok], mock_yj[mock_ok], bins=[bins_mag, bins_color]
+    )
+
+    # bin-by-bin ratio weights (normalised PDFs), clipped to avoid blow-up
+    n_real = real_ok.sum()
+    n_mock_ok = mock_ok.sum()
+    if n_real == 0 or n_mock_ok == 0:
+        return weights, "mock matching skipped: no valid VIS+Y-J objects"
+
+    real_pdf = real_hist / n_real
+    mock_pdf = mock_hist / n_mock_ok
+    eps = 1e-6
+    ratio = real_pdf / (mock_pdf + eps)
+    ratio = np.clip(ratio, 0, 10)
+
+    # assign weight to each mock object from its 2-D bin
+    ix = np.digitize(mock_vis, bins_mag)   - 1
+    iy = np.digitize(mock_yj,  bins_color) - 1
+    in_range = (mock_ok
+                & (ix >= 0) & (ix < ratio.shape[0])
+                & (iy >= 0) & (iy < ratio.shape[1]))
+    weights[in_range] = ratio[ix[in_range], iy[in_range]]
+
     return weights, (
-        f"mock matching: 1D VIS histogram with 24 bins "
-        f"(real n={real_band_ok.sum()}, mock detected n={mock_band_ok.sum()})"
+        f"mock matching: 2D VIS×(Y-J) histogram 24×24 bins "
+        f"(real n={n_real}, mock detected n={n_mock_ok})"
     )
 
 
@@ -162,8 +192,9 @@ def resample_mock_catalogue(mock_data, weights, seed=0):
     out = {}
     n_obj = mock_data["mag"].shape[1]
     for key, value in mock_data.items():
-        if isinstance(value, np.ndarray) and value.shape[-1] == n_obj:
-            out[key] = value[..., draw_idx]
+        if isinstance(value, np.ndarray) and n_obj in value.shape:
+            axis = list(value.shape).index(n_obj)
+            out[key] = np.take(value, draw_idx, axis=axis)
         else:
             out[key] = value
     return out, f"resampled weighted mock catalogue (effective N ≈ {eff_n:.0f})"
@@ -221,37 +252,39 @@ def print_debug_diagnostics(real_data, mock_data):
                 f"delta={delta_med:+.3f}  (n_real={real_ok.sum()}, n_mock={mock_ok.sum()})"
             )
 
-    print("\nPer-band median offset diagnostics:")
-    print("  delta = median(mock_true_mag of detected mocks) - median(real_obs_mag)")
+    print("\nPer-band median offset and KS diagnostics:")
+    print("  delta = median(mock_measured_mag of detected mocks) - median(real_obs_mag)")
     for fi, band in enumerate(FILTER_SHORT):
         real_mag = real_data["mag"][fi]
-        mock_true_mag = mock_data["true_mag"][fi]
-        mock_measured_mag = mock_data["mag"][fi]
+        mock_mag = mock_data["mag"][fi]
 
         real_ok = np.isfinite(real_mag)
-        mock_ok = np.isfinite(mock_true_mag) & np.isfinite(mock_measured_mag) & (mock_measured_mag < NONDET_MAG - 0.5)
+        mock_ok = np.isfinite(mock_mag) & (mock_mag < NONDET_MAG - 0.5)
         if not np.any(real_ok) or not np.any(mock_ok):
             print(f"  {band:>10s}: insufficient valid data")
             continue
 
         real_med = float(np.nanmedian(real_mag[real_ok]))
-        mock_med = float(np.nanmedian(mock_true_mag[mock_ok]))
+        mock_med = float(np.nanmedian(mock_mag[mock_ok]))
         delta_med = mock_med - real_med
+        ks = ks_2samp(real_mag[real_ok], mock_mag[mock_ok])
         print(
-            f"  {band:>10s}: real={real_med:.3f}, mock_true={mock_med:.3f}, "
-            f"delta={delta_med:+.3f}  (n_real={real_ok.sum()}, n_mock={mock_ok.sum()})"
+            f"  {band:>10s}: real={real_med:.3f}, mock={mock_med:.3f}, "
+            f"delta={delta_med:+.3f}  KS={ks.statistic:.3f} p={ks.pvalue:.1e}"
+            f"  (n_real={real_ok.sum()}, n_mock={mock_ok.sum()})"
         )
 
 
 def debug_flux_scale(real_data, mock_data):
-    """Print per-band median flux ratio mock_true / real."""
-    print("\n=== FLUX SCALE DEBUG ===")
+    """Print per-band median flux ratio: noisy mock (detected) vs real."""
+    print("\n=== FLUX SCALE DEBUG (noisy mock detected vs real) ===")
     for fi, band in enumerate(FILTER_SHORT):
         real_flux = real_data["flux"][fi]
-        mock_flux = mock_data["true_flux"][fi]
+        mock_mag_noisy = mock_data["mag"][fi]
+        mock_flux = mag_to_flux_ujy(mock_mag_noisy)
 
         real_ok = np.isfinite(real_flux) & (real_flux > 0)
-        mock_ok = np.isfinite(mock_flux) & (mock_flux > 0)
+        mock_ok = np.isfinite(mock_mag_noisy) & (mock_mag_noisy < NONDET_MAG - 0.5)
         if not np.any(real_ok) or not np.any(mock_ok):
             print(f"{band:>10s}: insufficient valid fluxes")
             continue
@@ -260,109 +293,6 @@ def debug_flux_scale(real_data, mock_data):
         mock_med = np.nanmedian(mock_flux[mock_ok])
         ratio = mock_med / real_med
         print(f"{band:>10s}: mock/real flux ratio = {ratio:.3f}")
-
-
-def _pair_color(mag_data, idx_a, idx_b):
-    """Return color mag[idx_a] - mag[idx_b] and valid mask."""
-    mag_a = mag_data[idx_a]
-    mag_b = mag_data[idx_b]
-    valid = np.isfinite(mag_a) & np.isfinite(mag_b)
-    return mag_a - mag_b, valid
-
-
-def plot_intrinsic_color_color(real_data, mock_data, outdir):
-    """Compare observed and intrinsic (pre-noise) color-color loci."""
-    idx = {name: FILTER_SHORT.index(name) for name in FILTER_SHORT}
-    required = ["VIS", "NISP-Y", "NISP-J", "NISP-H"]
-    if not all(name in idx for name in required):
-        return None
-
-    vis_y_real, m1r = _pair_color(real_data["mag"], idx["VIS"], idx["NISP-Y"])
-    y_j_real, m2r = _pair_color(real_data["mag"], idx["NISP-Y"], idx["NISP-J"])
-    j_h_real, m3r = _pair_color(real_data["mag"], idx["NISP-J"], idx["NISP-H"])
-
-    vis_y_mock, m1m = _pair_color(mock_data["true_mag"], idx["VIS"], idx["NISP-Y"])
-    y_j_mock, m2m = _pair_color(mock_data["true_mag"], idx["NISP-Y"], idx["NISP-J"])
-    j_h_mock, m3m = _pair_color(mock_data["true_mag"], idx["NISP-J"], idx["NISP-H"])
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=140)
-
-    mask_real = m1r & m2r
-    mask_mock = m1m & m2m
-    axes[0].scatter(vis_y_real[mask_real], y_j_real[mask_real], s=4, alpha=0.18, label="Real obs")
-    axes[0].scatter(vis_y_mock[mask_mock], y_j_mock[mask_mock], s=4, alpha=0.18, label="Mock true")
-    axes[0].set_xlabel("VIS - Y")
-    axes[0].set_ylabel("Y - J")
-    axes[0].legend(loc="best", fontsize=8)
-
-    mask_real = m2r & m3r
-    mask_mock = m2m & m3m
-    axes[1].scatter(y_j_real[mask_real], j_h_real[mask_real], s=4, alpha=0.18, label="Real obs")
-    axes[1].scatter(y_j_mock[mask_mock], j_h_mock[mask_mock], s=4, alpha=0.18, label="Mock true")
-    axes[1].set_xlabel("Y - J")
-    axes[1].set_ylabel("J - H")
-    axes[1].legend(loc="best", fontsize=8)
-
-    fig.suptitle("Intrinsic color-color (mock true) vs observed colors")
-    fig.tight_layout()
-    out = outdir / "colors_intrinsic_true_vs_real.png"
-    fig.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-    return out
-
-
-def plot_intrinsic_color_vs_parameters(mock_data, model, outdir):
-    """Plot intrinsic color versus z, Av, Z and sSFR."""
-    if model.theta is None:
-        return []
-
-    idx = {name: FILTER_SHORT.index(name) for name in FILTER_SHORT}
-    if "DECam-i" not in idx:
-        return []
-
-    theta_idx = mock_data.get("indices", None)
-    if theta_idx is None:
-        theta_idx = np.arange(mock_data["true_mag"].shape[1])
-    theta_use = model.theta[np.asarray(theta_idx, dtype=int)]
-
-    log_mstar = theta_use[:, 0]
-    log_sfr = theta_use[:, 2]
-    z_vals = theta_use[:, 7]
-    av_vals = theta_use[:, 6]
-    zmet_vals = theta_use[:, 5]
-    ssfr_vals = log_sfr - log_mstar
-
-    param_defs = [
-        (z_vals, "z"),
-        (av_vals, "Av"),
-        (zmet_vals, "Z [M/H]"),
-        (ssfr_vals, "log sSFR"),
-    ]
-
-    saved = []
-    i_idx = idx["DECam-i"]
-    for z_band in ["DECam-z", "HSC-z"]:
-        if z_band not in idx:
-            continue
-        z_idx = idx[z_band]
-        color = mock_data["true_mag"][z_idx] - mock_data["true_mag"][i_idx]
-
-        fig, axes = plt.subplots(2, 2, figsize=(11, 8), dpi=140)
-        for ax, (param_vals, param_label) in zip(axes.ravel(), param_defs):
-            valid = np.isfinite(color) & np.isfinite(param_vals)
-            ax.scatter(param_vals[valid], color[valid], s=4, alpha=0.18)
-            ax.set_xlabel(param_label)
-            ax.set_ylabel(f"{z_band} - DECam-i")
-            ax.grid(alpha=0.2)
-
-        fig.suptitle(f"Intrinsic color vs physical parameters: {z_band} - DECam-i")
-        fig.tight_layout()
-        out = outdir / f"intrinsic_color_vs_params_{z_band.replace('-', '_')}_minus_DECam_i.png"
-        fig.savefig(out, bbox_inches="tight")
-        plt.close(fig)
-        saved.append(out)
-
-    return saved
 
 
 def load_real_data(fits_path, patch_id=PATCH_ID, aperture=None, snr_min=SNR_DETECTION_THRESHOLD):
@@ -576,12 +506,12 @@ def save_validation_plots(real_data, mock_data, model, outdir):
     saved.append(out)
     print(f"  {out.name}")
 
-    out = plot_intrinsic_color_color(real_data, mock_data, outdir)
+    out = plot_intrinsic_color_color(real_data, mock_data, outdir, FILTER_SHORT)
     if out:
         saved.append(out)
         print(f"  {out.name}")
 
-    param_plots = plot_intrinsic_color_vs_parameters(mock_data, model, outdir)
+    param_plots = plot_intrinsic_color_vs_parameters(mock_data, model, outdir, FILTER_SHORT)
     saved.extend(param_plots)
     for out in param_plots:
         print(f"  {out.name}")
@@ -609,8 +539,8 @@ def build_parser():
                    help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
     p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
-    p.add_argument("--mock-match", choices=["none", "vis1d"], default="vis1d",
-                   help="Reweight/resample mocks to match real observed distributions (default: vis1d)")
+    p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="vis_yj2d",
+                   help="Reweight/resample mocks to match real observed distributions (default: vis_yj2d = 2D VIS×(Y-J) histogram)")
     return p
 
 

@@ -9,6 +9,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 
 def _style():
@@ -316,3 +317,129 @@ def plot_sigma_vs_mag_grid(real_mag, real_sigma, mock_mag, mock_sigma,
 	plt.savefig(out, bbox_inches="tight", dpi=130)
 	plt.close()
 	return out
+
+
+# ---------------------------------------------------------------------------
+# Intrinsic color diagnostics
+# ---------------------------------------------------------------------------
+
+def _pair_color(mag_data, idx_a, idx_b):
+	"""Return color mag[idx_a] - mag[idx_b] and valid mask."""
+	mag_a = mag_data[idx_a]
+	mag_b = mag_data[idx_b]
+	valid = np.isfinite(mag_a) & np.isfinite(mag_b)
+	return mag_a - mag_b, valid
+
+
+def plot_intrinsic_color_color(real_data, mock_data, outdir, filter_short):
+	"""Compare real observed and mock intrinsic (pre-noise) color-color loci.
+
+	Parameters
+	----------
+	filter_short : list[str]
+		Filter short names in filter-index order.
+	"""
+	idx = {name: filter_short.index(name) for name in filter_short}
+	required = ["VIS", "NISP-Y", "NISP-J", "NISP-H"]
+	if not all(name in idx for name in required):
+		return None
+
+	vis_y_real, m1r = _pair_color(real_data["mag"],       idx["VIS"],    idx["NISP-Y"])
+	y_j_real,   m2r = _pair_color(real_data["mag"],       idx["NISP-Y"], idx["NISP-J"])
+	j_h_real,   m3r = _pair_color(real_data["mag"],       idx["NISP-J"], idx["NISP-H"])
+
+	vis_y_mock, m1m = _pair_color(mock_data["true_mag"], idx["VIS"],    idx["NISP-Y"])
+	y_j_mock,   m2m = _pair_color(mock_data["true_mag"], idx["NISP-Y"], idx["NISP-J"])
+	j_h_mock,   m3m = _pair_color(mock_data["true_mag"], idx["NISP-J"], idx["NISP-H"])
+
+	fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=140)
+
+	mask_real = m1r & m2r
+	mask_mock = m1m & m2m
+	axes[0].hexbin(vis_y_real[mask_real], y_j_real[mask_real], gridsize=100, bins="log", cmap="Blues")
+	axes[0].hexbin(vis_y_mock[mask_mock], y_j_mock[mask_mock], gridsize=100, bins="log", cmap="Reds", alpha=0.6)
+	axes[0].set_xlabel("VIS - Y")
+	axes[0].set_ylabel("Y - J")
+	axes[0].legend(handles=[
+		mpatches.Patch(color="steelblue", label="Real obs"),
+		mpatches.Patch(color="tomato",    label="Mock true"),
+	], loc="best", fontsize=8)
+
+	mask_real = m2r & m3r
+	mask_mock = m2m & m3m
+	axes[1].hexbin(y_j_real[mask_real], j_h_real[mask_real], gridsize=100, bins="log", cmap="Blues")
+	axes[1].hexbin(y_j_mock[mask_mock], j_h_mock[mask_mock], gridsize=100, bins="log", cmap="Reds", alpha=0.6)
+	axes[1].set_xlabel("Y - J")
+	axes[1].set_ylabel("J - H")
+	axes[1].legend(handles=[
+		mpatches.Patch(color="steelblue", label="Real obs"),
+		mpatches.Patch(color="tomato",    label="Mock true"),
+	], loc="best", fontsize=8)
+
+	fig.suptitle("Intrinsic color-color (mock true) vs observed colors")
+	fig.tight_layout()
+	out = Path(outdir) / "colors_intrinsic_vs_observed.png"
+	fig.savefig(out, bbox_inches="tight")
+	plt.close(fig)
+	return out
+
+
+def plot_intrinsic_color_vs_parameters(mock_data, model, outdir, filter_short):
+	"""Plot intrinsic mock color versus physical parameters (z, Av, Z, sSFR).
+
+	Parameters
+	----------
+	filter_short : list[str]
+		Filter short names in filter-index order.
+	"""
+	if model.theta is None:
+		return []
+
+	idx = {name: filter_short.index(name) for name in filter_short}
+	if "DECam-i" not in idx:
+		return []
+
+	theta_idx = mock_data.get("indices", None)
+	if theta_idx is None:
+		theta_idx = np.arange(mock_data["true_mag"].shape[1])
+	theta_use = model.theta[np.asarray(theta_idx, dtype=int)]
+
+	log_mstar  = theta_use[:, 0]
+	log_sfr    = theta_use[:, 2]
+	z_vals     = theta_use[:, 7]
+	av_vals    = theta_use[:, 6]
+	zmet_vals  = theta_use[:, 5]
+	ssfr_vals  = log_sfr - log_mstar
+
+	param_defs = [
+		(z_vals,    "z"),
+		(av_vals,   "Av"),
+		(zmet_vals, "Z [M/H]"),
+		(ssfr_vals, "log sSFR"),
+	]
+
+	saved = []
+	i_idx = idx["DECam-i"]
+	for z_band in ["DECam-z", "HSC-z"]:
+		if z_band not in idx:
+			continue
+		z_idx = idx[z_band]
+		color = mock_data["true_mag"][z_idx] - mock_data["true_mag"][i_idx]
+		color_valid = np.isfinite(color)   # computed once, outside the param loop
+
+		fig, axes = plt.subplots(2, 2, figsize=(11, 8), dpi=140)
+		for ax, (param_vals, param_label) in zip(axes.ravel(), param_defs):
+			valid = color_valid & np.isfinite(param_vals)
+			ax.hexbin(param_vals[valid], color[valid], gridsize=100, bins="log", cmap="viridis")
+			ax.set_xlabel(param_label)
+			ax.set_ylabel(f"{z_band} - DECam-i")
+			ax.grid(alpha=0.2)
+
+		fig.suptitle(f"Intrinsic color vs physical parameters: {z_band} - DECam-i")
+		fig.tight_layout()
+		out = Path(outdir) / f"intrinsic_color_vs_params_{z_band.replace('-', '_')}_minus_DECam_i.png"
+		fig.savefig(out, bbox_inches="tight")
+		plt.close(fig)
+		saved.append(out)
+
+	return saved
