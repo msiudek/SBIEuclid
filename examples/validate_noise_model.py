@@ -627,6 +627,19 @@ def main():
 
     load_or_simulate_model(model, args, outdir)
 
+    print("Checking luminosity scaling...")
+    # model.obs stores noiseless magnitudes (n_sim, n_filt); convert to flux for comparison
+    m1 = model.theta[0, 0]
+    m2 = model.theta[1, 0]
+    f1 = float(np.nanmedian(mag_to_flux_ujy(model.obs[0])))
+    f2 = float(np.nanmedian(mag_to_flux_ujy(model.obs[1])))
+    print(f"  logM1={m1:.2f}, median_flux1={f1:.3e} uJy")
+    print(f"  logM2={m2:.2f}, median_flux2={f2:.3e} uJy")
+    if f1 > 0 and f2 > 0:
+        print(f"  flux ratio = {f2/f1:.2f}, expected ~ {10**(m2-m1):.2f}")
+    else:
+        print("  flux ratio: skipped (non-positive flux)")
+
     print("[2/3] Applying observational realism...")
     model.load_obs_features()
     model.add_noise_nan_limit_all()
