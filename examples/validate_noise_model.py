@@ -275,6 +275,44 @@ def print_debug_diagnostics(real_data, mock_data):
         )
 
 
+def apply_mag_calibration(real_data, mock_data):
+    """
+    Apply per-band median magnitude calibration to shift mocks onto the real data.
+
+    delta_mag[fi] = median(detected mock mag) - median(detected real mag)
+    mag_corrected  = mag_mock - delta_mag      (shifts mock towards real)
+    """
+    delta_mag = np.full(len(FILTER_SHORT), np.nan)
+    mock_mag_cal = mock_data["mag"].copy()
+
+    print("\nPer-band calibration (delta = median(mock_detected) - median(real)):")
+    for fi, band in enumerate(FILTER_SHORT):
+        real_mag = real_data["mag"][fi]
+        mock_mag = mock_data["mag"][fi]
+
+        real_ok = np.isfinite(real_mag)
+        mock_ok = np.isfinite(mock_mag) & (mock_mag < NONDET_MAG - 0.5)
+
+        if not np.any(real_ok) or not np.any(mock_ok):
+            print(f"  {band:>10s}: skipped (insufficient valid data)")
+            continue
+
+        real_med = float(np.nanmedian(real_mag[real_ok]))
+        mock_med = float(np.nanmedian(mock_mag[mock_ok]))
+        d = mock_med - real_med
+        delta_mag[fi] = d
+
+        mock_mag_cal[fi] = mock_mag - d
+        print(
+            f"  {band:>10s}: delta={d:+.3f} mag  "
+            f"(mock_med={mock_med:.3f}, real_med={real_med:.3f})  applied: -({d:+.3f})"
+        )
+
+    mock_data_cal = dict(mock_data)
+    mock_data_cal["mag"] = mock_mag_cal
+    return mock_data_cal, delta_mag
+
+
 def debug_flux_scale(real_data, mock_data):
     """Print per-band median flux ratio: noisy mock (detected) vs real."""
     print("\n=== FLUX SCALE DEBUG (noisy mock detected vs real) ===")
@@ -541,6 +579,9 @@ def build_parser():
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
     p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="vis_yj2d",
                    help="Reweight/resample mocks to match real observed distributions (default: vis_yj2d = 2D VIS×(Y-J) histogram)")
+    p.add_argument("--calibrate", action="store_true",
+                   help="Apply per-band median magnitude calibration after mock-matching: "
+                        "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
     return p
 
 
@@ -618,6 +659,10 @@ def main():
         print(f"  non-zero weights: {(mock_weights > 0).sum()} / {mock_weights.size}")
         mock_data, resample_msg = resample_mock_catalogue(mock_data, mock_weights, seed=0)
         print(f"  {resample_msg}")
+
+    if args.calibrate:
+        mock_data, delta_mag = apply_mag_calibration(real_data, mock_data)
+        print(f"  Per-band calibration applied to {np.sum(np.isfinite(delta_mag))} / {len(FILTER_SHORT)} bands")
 
     save_validation_plots(real_data, mock_data, model, outdir)
 
