@@ -153,7 +153,12 @@ if args.params == "mass_sfr":
     PARAM_NAMES = ["logM", "logMformed", "logSFR"]
     sx.theta = sx.theta[:, PARAM_IDXS]
     sx.labels = PARAM_NAMES
+    # Important: with infer_z=False, sbipix.train() treats the last theta
+    # column as known redshift and removes it from inferred targets.
+    # For mass_sfr we want 3 inferred parameters, so enable infer_z mode.
+    sx.infer_z = True
     print(f"    Using columns: {PARAM_IDXS} -> {PARAM_NAMES}")
+    print("    infer_z=True for mass_sfr mode (infer all 3 selected parameters)")
 else:
     print(f"    Using all parameters: {sx.theta.shape[1]} dimensions")
 
@@ -207,6 +212,20 @@ posterior = sx.test_performance(
 print("Performance test complete!")
 print(f"   - Tested on {posterior.shape[0]} galaxies")
 print(f"   - Posterior shape: {posterior.shape}")
+
+expected_params = len(sx.labels)
+actual_params = posterior.shape[-1]
+if actual_params != expected_params:
+    msg = (
+        f"Posterior dimension mismatch: expected {expected_params} from labels {sx.labels}, "
+        f"got {actual_params}."
+    )
+    if args.skip_train:
+        raise RuntimeError(
+            msg + " Likely reusing an older incompatible model; rerun without --skip-train."
+        )
+    else:
+        print(f"WARNING: {msg}")
 
 # posterior: (N_test, N_samples, n_params)
 
