@@ -1,6 +1,6 @@
+import argparse
 from pathlib import Path
 import numpy as np
-import matplotlib.pyplot as plt
 
 try:
     import torch
@@ -9,20 +9,50 @@ except ImportError:
     _DEVICE = "cpu"
 
 from sbipix import sbipix
+from sbipix.plotting import plot_test_performance
+
+
+def build_parser():
+    p = argparse.ArgumentParser(description="Train SBIPIX model for Euclid photometry")
+    p.add_argument(
+        "--params",
+        choices=["all", "mass_sfr"],
+        default="mass_sfr",
+        help="Parameter set to infer: all atlas parameters or only [logM, logMformed, logSFR]",
+    )
+    p.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run a quick local check (train on 5k objects, 20 epochs)",
+    )
+    p.add_argument(
+        "--n-test",
+        type=int,
+        default=250,
+        help="Number of galaxies used in test-time inference/performance (default: 250)",
+    )
+    p.add_argument(
+        "--skip-train",
+        action="store_true",
+        help="Skip training and reuse existing model file at model_path/model_name",
+    )
+    return p
 
 
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
 N_SIM    = 100_000   # must match the atlas on disk
-N_TEST   = 500
+N_TEST   = 250
 N_POSTERIOR = 200
 
+args = build_parser().parse_args()
+N_TEST = args.n_test
+
 # Set to True for a quick laptop smoke test (small training subset, few epochs)
-SMOKE_TEST = False
+SMOKE_TEST = args.smoke_test
 if SMOKE_TEST:
     N_TRAIN_MAX = 5_000   # subsample after loading — atlas size stays 100k
-    N_TEST      = 100
     N_POSTERIOR = 50
 else:
     N_TRAIN_MAX = N_SIM
@@ -112,19 +142,22 @@ print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logS
 
 
 # --------------------------------------------------
-# SELECT TARGETS: logM + logSFR ONLY
+# SELECT TARGETS
 # --------------------------------------------------
-print("[3/5] Selecting parameters (logM, logSFR)...")
+print(f"[3/5] Selecting parameters ({args.params})...")
+
 # theta column order is fixed: 0=logM*, 1=logM*_formed, 2=logSFR,
 #                               3=tau, 4=t_i, 5=[M/H], 6=Av, 7=z
-MASS_IDX = 0
-SFR_IDX  = 2
+if args.params == "mass_sfr":
+    PARAM_IDXS = [0, 1, 2]
+    PARAM_NAMES = ["logM", "logMformed", "logSFR"]
+    sx.theta = sx.theta[:, PARAM_IDXS]
+    sx.labels = PARAM_NAMES
+    print(f"    Using columns: {PARAM_IDXS} -> {PARAM_NAMES}")
+else:
+    print(f"    Using all parameters: {sx.theta.shape[1]} dimensions")
 
-sx.theta  = sx.theta[:, [MASS_IDX, SFR_IDX]]
-sx.labels = ["logM", "logSFR"]
 sx.n_simulation = len(sx.theta)
-
-print(f"    Using columns: logM={MASS_IDX}, logSFR={SFR_IDX}")
 
 # Parameter bounds for normalization
 max_thetas = np.max(sx.theta, axis=0)
@@ -139,15 +172,25 @@ for i, name in enumerate(sx.labels):
 # --------------------------------------------------
 print("[4/5] Training...")
 
+n_train_use = min(N_TRAIN_MAX, len(sx.theta))
+print(f"    Training samples used (n_max): {n_train_use}")
 
-sx.train(
-    min_thetas=min_thetas,
-    max_thetas=max_thetas,
-    n_max=min(N_TRAIN_MAX, len(sx.theta)),
-    nblocks=4,
-    nhidden=128,
-    epochs_max=20 if SMOKE_TEST else 200,
-)
+if args.skip_train:
+    model_file = Path(sx.model_path) / sx.model_name
+    if not model_file.exists():
+        raise FileNotFoundError(
+            f"--skip-train requested but model file does not exist: {model_file}"
+        )
+    print(f"    Skipping training; reusing existing model: {model_file}")
+else:
+    sx.train(
+        min_thetas=min_thetas,
+        max_thetas=max_thetas,
+        n_max=n_train_use,
+        nblocks=4,
+        nhidden=128,
+        epochs_max=20 if SMOKE_TEST else 200,
+    )
 
 
 # --------------------------------------------------
@@ -165,33 +208,18 @@ print("Performance test complete!")
 print(f"   - Tested on {posterior.shape[0]} galaxies")
 print(f"   - Posterior shape: {posterior.shape}")
 
-# posterior: (N_test, N_samples, 2)
-
-theta_true = sx.theta[:posterior.shape[0]]
-
-pred_mean = np.median(posterior, axis=1)
-
+# posterior: (N_test, N_samples, n_params)
 
 # --------------------------------------------------
 # PLOT RESULTS
 # --------------------------------------------------
-n_params = posterior.shape[-1]
-names = sx.labels[:n_params]
-fig, axes = plt.subplots(1, max(n_params, 1), figsize=(5 * max(n_params, 1), 5))
-axes = np.atleast_1d(axes)
-
-for i in range(n_params):
-    t = theta_true[:, i]
-    p = pred_mean[:, i]
-    axes[i].scatter(t, p, s=5, alpha=0.5)
-    axes[i].plot([t.min(), t.max()], [t.min(), t.max()], "r--")
-    axes[i].set_xlabel(f"True {names[i]}")
-    axes[i].set_ylabel(f"Pred {names[i]}")
-    axes[i].grid(alpha=0.3)
-
-plt.suptitle(f"Recovery: {', '.join(names)}")
-plt.tight_layout()
-plt.savefig("recovery_logM_logSFR.png", dpi=150)
-plt.show()
-
-print("Saved: recovery_logM_logSFR.png")
+n_params_plot = min(posterior.shape[-1], sx.theta.shape[1], len(sx.labels))
+plot_name = f"test_performance_{args.params}_"
+plot_test_performance(
+    sx,
+    n_test=min(N_TEST, len(sx.theta)),
+    n_theta=n_params_plot,
+    save=True,
+    name=plot_name,
+)
+print(f"Saved: sbi-logs/{plot_name}*.png")
