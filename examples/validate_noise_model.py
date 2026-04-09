@@ -291,21 +291,23 @@ def apply_mag_calibration(real_data, mock_data):
         mock_mag = mock_data["mag"][fi]
 
         real_ok = np.isfinite(real_mag)
-        mock_ok = np.isfinite(mock_mag) & (mock_mag < NONDET_MAG - 0.5)
+        mock_det = np.isfinite(mock_mag) & (mock_mag < NONDET_MAG - 0.5)
 
-        if not np.any(real_ok) or not np.any(mock_ok):
+        if not np.any(real_ok) or not np.any(mock_det):
             print(f"  {band:>10s}: skipped (insufficient valid data)")
             continue
 
         real_med = float(np.nanmedian(real_mag[real_ok]))
-        mock_med = float(np.nanmedian(mock_mag[mock_ok]))
+        mock_med = float(np.nanmedian(mock_mag[mock_det]))
         d = mock_med - real_med
         delta_mag[fi] = d
 
-        mock_mag_cal[fi] = mock_mag - d
+        # Apply ONLY to detected objects — leave NaN and non-det sentinel (99) untouched
+        mock_mag_cal[fi][mock_det] = mock_mag[mock_det] - d
         print(
             f"  {band:>10s}: delta={d:+.3f} mag  "
             f"(mock_med={mock_med:.3f}, real_med={real_med:.3f})  applied: -({d:+.3f})"
+            f"  n_det={mock_det.sum()}"
         )
 
     mock_data_cal = dict(mock_data)
