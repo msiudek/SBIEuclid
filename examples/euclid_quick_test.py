@@ -39,21 +39,12 @@ def build_parser():
     parser.add_argument("--aperture", default="2fwhm",
                         choices=["2fwhm", "3fwhm"],
                         help="Aperture size (default: 2fwhm)")
-    parser.add_argument("--noise-model", default="sigma_mag",
-                        choices=["sigma_mag", "depth_corrected"],
-                        help="Noise model: sigma(mag) or depth-corrected (default: sigma_mag)")
-    parser.add_argument("--std-scale", type=float, default=1.2,
-                        help="Standard deviation scale factor (default: 1.2)")
-    parser.add_argument("--smooth-bins", action="store_true", default=True,
-                        help="Interpolate sigma statistics between bins (default: True)")
     parser.add_argument("--detection-model", default="probabilistic",
                         choices=["hard", "probabilistic"],
                         help="Detection model (default: probabilistic)")
     parser.add_argument("--sigma-sampler", default="empirical",
                         choices=["empirical", "truncnorm", "lognormal"],
                         help="Sigma sampler distribution (default: empirical)")
-    parser.add_argument("--sigma-clip-max", type=float, default=0.8,
-                        help="Clip sampled sigma above this mag threshold for non-empirical samplers (default: 0.8)")
     parser.add_argument("--fits-file", default="obs/obs_properties/COSMOS_DEEP.fits",
                         help="Real COSMOS-Deep FITS file for mock matching")
     parser.add_argument("--patch-id", type=int, default=98,
@@ -329,16 +320,12 @@ def main():
 
     # Configure noise model with optimal parameters
     sx.configure_noise_model(
-        noise_model=args.noise_model,
-        std_scale=args.std_scale,
-        smooth_bins=args.smooth_bins,
         sigma_sampler=args.sigma_sampler,
-        sigma_clip_max=args.sigma_clip_max,
         detection_model=args.detection_model,
     )
 
     print(f"[0/5] Configuration: {args.noise_prefix}, aperture={args.aperture}, "
-          f"noise_model={args.noise_model}, std_scale={args.std_scale}, "
+          f"noise_model=sigma_mag, "
           f"detection={args.detection_model}, sampler={args.sigma_sampler}")
     print(f"      atlas: {sx.atlas_name}{' (reusing existing)' if args.skip_simulate else ''}")
     print()

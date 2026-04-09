@@ -1,8 +1,16 @@
 """
 SED processing utilities for SBIPIX.
+
+This module provides shared utilities for:
+- Flux and magnitude conversions
+- Filter metadata loading
+- Photometry data extraction from FITS catalogs
+- Band/filter lookups
 """
 
 import numpy as np
+from pathlib import Path
+import os
 
 
 def mag_conversion(x, convert_to='mag'):
@@ -202,3 +210,199 @@ def convert_to_microjansky(spec, zval, cosmo):
     flux_ujy = flux_jy * 1e6
     
     return flux_ujy
+
+
+# ============================================================================
+# Validation & Photometry Utilities
+# ============================================================================
+
+def flux_ujy_to_mag(flux_ujy):
+    """
+    Convert flux in μJy to AB magnitude; returns NaN for non-positive flux.
+    
+    Parameters
+    ----------
+    flux_ujy : float or np.ndarray
+        Flux in microjansky
+        
+    Returns
+    -------
+    float or np.ndarray
+        AB magnitude(s)
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mag = -2.5 * np.log10(flux_ujy / 3631e6)
+    return mag
+
+
+def flux_ujy_to_mag_err(flux_ujy, fluxerr_ujy):
+    """
+    Convert flux error to magnitude error using standard propagation.
+    
+    Parameters
+    ----------
+    flux_ujy : float or np.ndarray
+        Flux in microjansky
+    fluxerr_ujy : float or np.ndarray
+        Flux error in microjansky
+        
+    Returns
+    -------
+    float or np.ndarray
+        Magnitude error(s)
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mag_err = (2.5 / np.log(10)) * (fluxerr_ujy / flux_ujy)
+    return mag_err
+
+
+def mag_to_flux_ujy(mag):
+    """
+    Convert AB magnitude to flux in μJy.
+    
+    Parameters
+    ----------
+    mag : float or np.ndarray
+        AB magnitude(s)
+        
+    Returns
+    -------
+    float or np.ndarray
+        Flux in microjansky
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        flux = 3631e6 * 10.0 ** (-mag / 2.5)
+    return flux
+
+
+def band_to_index(band_name, filter_short_list):
+    """
+    Resolve filter short name to filter index in list.
+    
+    Parameters
+    ----------
+    band_name : str or None
+        Filter short name (e.g., 'VIS', 'NISP-H')
+    filter_short_list : list
+        List of filter short names
+        
+    Returns
+    -------
+    int
+        index in filter_short_list or None if not found
+    """
+    if band_name is None:
+        return None
+    lookup = {name.lower(): i for i, name in enumerate(filter_short_list)}
+    key = band_name.lower()
+    if key not in lookup:
+        raise ValueError(f"Band '{band_name}' not in filter list {filter_short_list}")
+    return lookup[key]
+
+
+# ============================================================================
+# Filter & FITS Data Loading
+# ============================================================================
+
+def load_filter_metadata(filter_list_file, filt_dir="."):
+    """
+    Load filter metadata from filters_to_use.dat file.
+    
+    Expected format: 3-column file with filter_rel_path, short_name, col_stem
+    (lines starting with # are comments)
+    
+    Parameters
+    ----------
+    filter_list_file : str
+        Path to filters_to_use.dat file
+    filt_dir : str
+        Directory containing the filter files (default: current dir)
+        
+    Returns
+    -------
+    list of dict
+        Each dict has keys: 'path', 'rel_path', 'short', 'col_stem'
+    """
+    entries = []
+    with open(os.path.join(filt_dir, filter_list_file)) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) != 3:
+                raise ValueError(
+                    f"{filter_list_file}: expected 3 columns (path short col_stem), "
+                    f"got {len(parts)} in: {line!r}"
+                )
+            rel_path, short, col_stem = parts
+            entries.append({
+                "path": os.path.join(filt_dir, rel_path),
+                "rel_path": rel_path,
+                "short": short,
+                "col_stem": col_stem,
+            })
+    return entries
+
+
+def load_photometry_from_fits(fits_path, filter_config, patch_id=98):
+    """
+    Load photometry and errors from COSMOS-Deep FITS catalog.
+    
+    Parameters
+    ----------
+    fits_path : str
+        Path to COSMOS-Deep FITS catalog
+    filter_config : list of tuple
+        List of (short_name, col_stem) tuples for each filter
+    patch_id : int
+        Patch ID to select (default: 98)
+        
+    Returns
+    -------
+    tuple of (real_mag, real_sigma, real_det, filter_short)
+        real_mag : (n_filt, n_gal) filter-major magnitude array
+        real_sigma : (n_filt, n_gal) filter-major error array
+        real_det : (n_filt, n_gal) boolean detection array
+        filter_short : list of filter short names
+    """
+    from astropy.table import Table
+    
+    cat = Table.read(fits_path)
+    
+    # Select by patch ID
+    patch_col = cat["patch_id_list"]
+    try:
+        patch_mask = np.array([int(v) == patch_id for v in patch_col])
+    except (ValueError, TypeError):
+        patch_mask = np.array([str(v).strip() == str(patch_id) for v in patch_col])
+    
+    cat = cat[patch_mask]
+    
+    # Extract magnitudes and errors for all filters
+    n_filt = len(filter_config)
+    n_gal = len(cat)
+    
+    real_mag = np.full((n_filt, n_gal), np.nan)
+    real_sigma = np.full((n_filt, n_gal), np.nan)
+    
+    filter_short = []
+    
+    for fi, (fname, col_stem) in enumerate(filter_config):
+        filter_short.append(fname)
+        
+        mag_col = col_stem
+        err_col = col_stem + "_err"
+        
+        if mag_col in cat.colnames and err_col in cat.colnames:
+            mag_vals = np.asarray(cat[mag_col], dtype=float)
+            err_vals = np.asarray(cat[err_col], dtype=float)
+            
+            # Mark valid measurements
+            valid = np.isfinite(mag_vals) & np.isfinite(err_vals) & (err_vals > 0)
+            real_mag[fi, valid] = mag_vals[valid]
+            real_sigma[fi, valid] = err_vals[valid]
+    
+    real_det = np.isfinite(real_mag)
+    
+    return real_mag, real_sigma, real_det, filter_short

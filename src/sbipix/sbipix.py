@@ -164,19 +164,12 @@ class sbipix():
         self.include_mask = False
         self.include_limit = False
         self.condition_sigma = False
-        self.noise_std_scale = 1.0
-        self.noise_bin_interpolation = False
         self.noise_sigma_sampler = 'empirical'
-        self.noise_sigma_clip_max = None
-        self.noise_model = 'sigma_mag'
-        self.noise_depth_nsigma = 1.0
-        self.noise_corr_clip_min = 0.2
-        self.noise_corr_clip_max = 5.0
-        self.noise_corr_scatter_log = 0.0
         self.noise_detection_model = 'hard'
-        self.noise_detection_snr_offset = 0.0
-        self.noise_detection_snr_width = 1.0
         self.noise_sigma_mag_params = None
+        self.noise_sigma_mag_ranges = None
+        self.noise_sigma_mag_min = 1e-6
+        self.noise_sigma_mag_max = 10.0
         
         # Observational properties (loaded from files)
         self.mean_sigma_obs = None
@@ -286,39 +279,14 @@ class sbipix():
 
         self.refresh_filter_metadata()
 
-    def configure_noise_model(self, std_scale=None, smooth_bins=None,
-                              sigma_sampler=None, sigma_clip_max=None,
-                              noise_model=None, depth_nsigma=None,
-                              corr_clip_min=None, corr_clip_max=None,
-                              corr_scatter_log=None,
-                              detection_model=None,
-                              detection_snr_offset=None,
-                              detection_snr_width=None):
+    def configure_noise_model(self,
+                              sigma_sampler=None,
+                              detection_model=None):
         """Configure how observational uncertainties are sampled."""
-        if std_scale is not None:
-            self.noise_std_scale = float(std_scale)
-        if smooth_bins is not None:
-            self.noise_bin_interpolation = bool(smooth_bins)
         if sigma_sampler is not None:
             self.noise_sigma_sampler = str(sigma_sampler)
-        if sigma_clip_max is not None:
-            self.noise_sigma_clip_max = float(sigma_clip_max)
-        if noise_model is not None:
-            self.noise_model = str(noise_model)
-        if depth_nsigma is not None:
-            self.noise_depth_nsigma = float(depth_nsigma)
-        if corr_clip_min is not None:
-            self.noise_corr_clip_min = float(corr_clip_min)
-        if corr_clip_max is not None:
-            self.noise_corr_clip_max = float(corr_clip_max)
-        if corr_scatter_log is not None:
-            self.noise_corr_scatter_log = float(corr_scatter_log)
         if detection_model is not None:
             self.noise_detection_model = str(detection_model)
-        if detection_snr_offset is not None:
-            self.noise_detection_snr_offset = float(detection_snr_offset)
-        if detection_snr_width is not None:
-            self.noise_detection_snr_width = float(detection_snr_width)
 
     def _compute_bin_centers(self, filter_idx):
         """Return magnitude-bin centers from percentile boundaries."""
@@ -341,39 +309,10 @@ class sbipix():
             ])
         return centers, means_f
 
-    def _interpolate_noise_stats(self, mags_det, filter_idx):
-        """Interpolate mean/std sigma across magnitude-bin centers."""
-        percentiles_f = np.asarray(self.percentiles[:, filter_idx], dtype=float)
-        means_f = np.asarray(self.mean_sigma_obs[filter_idx], dtype=float)
-        stds_f = np.asarray(self.stds_sigma_obs[filter_idx], dtype=float)
-
-        mean_fill = np.nanmedian(means_f[np.isfinite(means_f)]) if np.isfinite(means_f).any() else 0.1
-        std_fill = np.nanmedian(stds_f[np.isfinite(stds_f)]) if np.isfinite(stds_f).any() else 0.05
-        means_f = np.where(np.isfinite(means_f), means_f, mean_fill)
-        stds_f = np.where(np.isfinite(stds_f), stds_f, std_fill)
-
-        if len(percentiles_f) == 0 or not np.isfinite(percentiles_f).all():
-            return np.full_like(mags_det, mean_fill, dtype=float), np.full_like(mags_det, std_fill, dtype=float)
-
-        if len(percentiles_f) == 1:
-            centers = np.array([percentiles_f[0] - 0.5, percentiles_f[0] + 0.5])
-        else:
-            left_center = percentiles_f[0] - 0.5 * (percentiles_f[1] - percentiles_f[0])
-            right_center = percentiles_f[-1] + 0.5 * (percentiles_f[-1] - percentiles_f[-2])
-            centers = np.concatenate([
-                [left_center],
-                0.5 * (percentiles_f[:-1] + percentiles_f[1:]),
-                [right_center],
-            ])
-
-        pixel_means = np.interp(mags_det, centers, means_f, left=means_f[0], right=means_f[-1])
-        pixel_stds = np.interp(mags_det, centers, stds_f, left=stds_f[0], right=stds_f[-1])
-        return pixel_means, pixel_stds
-
     def _sample_sigma_distribution(self, pixel_means, pixel_stds):
-        """Sample per-object uncertainty with optional inflation and clipping."""
+        """Sample per-object uncertainty."""
         pixel_means = np.maximum(np.asarray(pixel_means, dtype=float), 1e-6)
-        pixel_stds = np.maximum(np.asarray(pixel_stds, dtype=float) * self.noise_std_scale, 1e-6)
+        pixel_stds = np.maximum(np.asarray(pixel_stds, dtype=float), 1e-6)
 
         if self.noise_sigma_sampler == 'lognormal':
             sigma2 = np.log1p((pixel_stds / pixel_means) ** 2)
@@ -387,9 +326,6 @@ class sbipix():
                 loc=pixel_means,
                 scale=pixel_stds
             )
-
-        if self.noise_sigma_clip_max is not None:
-            mag_errs_det = np.minimum(mag_errs_det, self.noise_sigma_clip_max)
 
         return mag_errs_det
 
@@ -428,7 +364,7 @@ class sbipix():
             scatter = 0.3
         else:
             scatter = float(np.nanmax(candidate))
-        scatter = max(scatter * self.noise_std_scale, 1e-3)
+        scatter = max(scatter, 1e-3)
 
         return np.array([a, b, scatter], dtype=float)
 
@@ -436,9 +372,21 @@ class sbipix():
         """Prepare per-filter [a, b, scatter] for mag-conditioned lognormal sigma."""
         n_filters = self.mean_sigma_obs.shape[0]
         params = np.zeros((n_filters, 3), dtype=float)
+        ranges = np.zeros((n_filters, 2), dtype=float)
         for filter_idx in range(n_filters):
+            centers, _ = self._compute_bin_centers(filter_idx)
+            finite_centers = np.asarray(centers, dtype=float)
+            finite_centers = finite_centers[np.isfinite(finite_centers)]
+            if finite_centers.size == 0:
+                ranges[filter_idx] = np.array([20.0, 28.0], dtype=float)
+            else:
+                ranges[filter_idx] = np.array([
+                    float(np.nanmin(finite_centers)),
+                    float(np.nanmax(finite_centers)),
+                ], dtype=float)
             params[filter_idx] = self._fit_sigma_mag_lognormal_params(filter_idx)
         self.noise_sigma_mag_params = params
+        self.noise_sigma_mag_ranges = ranges
 
     def _sample_sigma_mag_lognormal(self, mags_det, filter_idx):
         """Sample sigma from exp(N(a + b*mag, scatter)) for one filter."""
@@ -446,12 +394,15 @@ class sbipix():
             self._prepare_sigma_mag_lognormal_params()
 
         a, b, scatter = self.noise_sigma_mag_params[filter_idx]
+        #scatter *= 0.7
         mags_det = np.asarray(mags_det, dtype=float)
+        if self.noise_sigma_mag_ranges is None:
+            self._prepare_sigma_mag_lognormal_params()
+        mag_min_fit, mag_max_fit = self.noise_sigma_mag_ranges[filter_idx]
+        mags_det = np.clip(mags_det, mag_min_fit, mag_max_fit)
         mu = a + b * mags_det
         mag_errs_det = np.random.lognormal(mean=mu, sigma=scatter)
-
-        if self.noise_sigma_clip_max is not None:
-            mag_errs_det = np.minimum(mag_errs_det, self.noise_sigma_clip_max)
+        mag_errs_det = np.clip(mag_errs_det, self.noise_sigma_mag_min, self.noise_sigma_mag_max)
 
         return mag_errs_det
 
@@ -478,40 +429,7 @@ class sbipix():
                 pooled_vals = np.concatenate(pooled_vals)
                 mag_errs_det[missing] = np.random.choice(pooled_vals, size=np.sum(missing), replace=True)
 
-        if self.noise_sigma_clip_max is not None:
-            mag_errs_det = np.minimum(mag_errs_det, self.noise_sigma_clip_max)
-
         return mag_errs_det
-
-    def _depth_corrected_flux_noise(self, mags_det, flux_det, filter_idx, limit_flux):
-        """Build sigma_f from depth floor and real-data correction C(m)."""
-        depth_nsigma = max(self.noise_depth_nsigma, 1e-6)
-        sigma_floor_flux = limit_flux / depth_nsigma
-
-        centers, means_f = self._compute_bin_centers(filter_idx)
-        mean_fill = np.nanmedian(means_f[np.isfinite(means_f)]) if np.isfinite(means_f).any() else 0.1
-        means_f = np.where(np.isfinite(means_f), means_f, mean_fill)
-
-        flux_center = np.maximum(mag_conversion(centers, convert_to='flux'), 1e-10)
-        sigma_mock_raw_center = np.abs(-2.5 / np.log(10) * sigma_floor_flux / flux_center)
-
-        corr_center = means_f / np.maximum(sigma_mock_raw_center, 1e-6)
-        corr_center = np.clip(corr_center, self.noise_corr_clip_min, self.noise_corr_clip_max)
-
-        corr_m = np.interp(mags_det, centers, corr_center, left=corr_center[0], right=corr_center[-1])
-
-        if self.noise_corr_scatter_log > 0:
-            corr_m = corr_m * np.random.lognormal(mean=0.0, sigma=self.noise_corr_scatter_log, size=len(corr_m))
-
-        sigma_f = sigma_floor_flux * corr_m
-        if self.noise_sigma_clip_max is not None:
-            sigma_mag_from_flux = np.abs(-2.5 / np.log(10) * sigma_f / np.maximum(flux_det, 1e-10))
-            too_high = sigma_mag_from_flux > self.noise_sigma_clip_max
-            if np.any(too_high):
-                sigma_f_cap = self.noise_sigma_clip_max * np.log(10) / 2.5 * np.maximum(flux_det, 1e-10)
-                sigma_f = np.where(too_high, sigma_f_cap, sigma_f)
-
-        return sigma_f
 
     def _draw_detection_mask(self, flux_obs, sigma_flux, limit_flux):
         """Return detection mask using either a hard threshold or a smooth S/N transition."""
@@ -526,10 +444,9 @@ class sbipix():
 
         if self.noise_detection_model == 'probabilistic':
             snr_obs = flux_obs[finite] / np.maximum(sigma_flux[finite], 1e-12)
-            snr_threshold = max(self.noise_depth_nsigma, 1e-6)
-            snr_width = max(self.noise_detection_snr_width, 1e-6)
-            snr_offset = self.noise_detection_snr_offset
-            delta_snr = snr_obs - snr_threshold - snr_offset
+            snr_threshold = 1.0
+            snr_width = 1.0
+            delta_snr = snr_obs - snr_threshold
             p_detect = 0.5 * (1.0 + np.tanh(delta_snr / snr_width))
             p_detect = np.clip(p_detect, 0.0, 1.0)
             draws = np.random.random(size=p_detect.shape)
@@ -915,98 +832,69 @@ class sbipix():
 
         valid_mask = np.isfinite(flux_array) & (flux_array > 0)
 
-        if self.noise_model == 'depth_corrected':
-            mags_valid = mag_array[valid_mask]
-            flux_valid = flux_array[valid_mask]
+        mags_valid = mag_array[valid_mask]
 
-            if mags_valid.size > 0:
-                sigma_f = self._depth_corrected_flux_noise(mags_valid, flux_valid, filter_idx, limit_flux)
-                flux_obs = flux_valid + np.random.normal(0.0, sigma_f)
-                flux_obs = np.maximum(flux_obs, 1e-12)
-                mags_obs = mag_conversion(flux_obs, convert_to='mag')
-                sigma_mag_obs = np.abs(-2.5 / np.log(10) * sigma_f / flux_obs)
+        if mags_valid.size > 0:
+            # 4. Find magnitude bins dynamically (replaces the slow if/elif chain)
+            bin_indices = np.zeros(len(mags_valid), dtype=int)
+            use_empirical_sigma = (
+                self.noise_sigma_sampler == 'empirical' and self.sigma_samples_obs is not None
+            )
+            use_mag_lognormal = self.noise_sigma_sampler == 'mag_lognormal'
 
-                if self.include_limit:
-                    detected_after_noise = self._draw_detection_mask(flux_obs, sigma_f, limit_flux)
-                else:
-                    detected_after_noise = np.ones_like(flux_obs, dtype=bool)
-
-                target_idx = np.where(valid_mask)[0]
-                det_idx = target_idx[detected_after_noise]
-
-                if self.include_sigma:
-                    final_mags[det_idx] = mags_obs[detected_after_noise]
-                else:
-                    final_mags[det_idx] = mags_valid[detected_after_noise]
-
-                final_errs[det_idx] = sigma_mag_obs[detected_after_noise]
-        else:
-            mags_valid = mag_array[valid_mask]
-
-            if mags_valid.size > 0:
-                # 4. Find magnitude bins dynamically (replaces the slow if/elif chain)
-                bin_indices = np.zeros(len(mags_valid), dtype=int)
-                use_empirical_sigma = (
-                    self.noise_sigma_sampler == 'empirical' and self.sigma_samples_obs is not None
+            if use_mag_lognormal:
+                mag_errs_det = np.asarray(
+                    self._sample_sigma_mag_lognormal(mags_valid, filter_idx),
+                    dtype=float,
                 )
-                use_mag_lognormal = self.noise_sigma_sampler == 'mag_lognormal'
+            else:
+                percentiles_f = self.percentiles[:, filter_idx]
+                bin_indices = np.digitize(mags_valid, percentiles_f)
 
-                if use_mag_lognormal:
+                # Clip to max bin index to avoid IndexError for very faint/bright sources
+                max_bin = self.mean_sigma_obs.shape[1] - 1
+                bin_indices = np.clip(bin_indices, 0, max_bin)
+
+                # 5. Extract statistics for the corresponding bins
+                pixel_means = self.mean_sigma_obs[filter_idx, bin_indices]
+                pixel_stds = self.stds_sigma_obs[filter_idx, bin_indices]
+
+                # 6. Sample σ values from the configured distribution
+                if use_empirical_sigma:
                     mag_errs_det = np.asarray(
-                        self._sample_sigma_mag_lognormal(mags_valid, filter_idx),
+                        self._sample_sigma_empirical(filter_idx, bin_indices),
                         dtype=float,
                     )
-                elif self.noise_bin_interpolation and not use_empirical_sigma:
-                    pixel_means, pixel_stds = self._interpolate_noise_stats(mags_valid, filter_idx)
+                else:
                     mag_errs_det = np.asarray(self._sample_sigma_distribution(pixel_means, pixel_stds), dtype=float)
-                else:
-                    percentiles_f = self.percentiles[:, filter_idx]
-                    bin_indices = np.digitize(mags_valid, percentiles_f)
 
-                    # Clip to max bin index to avoid IndexError for very faint/bright sources
-                    max_bin = self.mean_sigma_obs.shape[1] - 1
-                    bin_indices = np.clip(bin_indices, 0, max_bin)
+            finite_sigma = np.isfinite(mag_errs_det) & (mag_errs_det > 0)
+            if not np.any(finite_sigma):
+                return final_mags, final_errs
 
-                    # 5. Extract statistics for the corresponding bins
-                    pixel_means = self.mean_sigma_obs[filter_idx, bin_indices]
-                    pixel_stds = self.stds_sigma_obs[filter_idx, bin_indices]
+            mags_valid = mags_valid[finite_sigma]
+            mag_errs_det = mag_errs_det[finite_sigma]
 
-                    # 6. Sample σ values from the configured distribution
-                    if use_empirical_sigma:
-                        mag_errs_det = np.asarray(
-                            self._sample_sigma_empirical(filter_idx, bin_indices),
-                            dtype=float,
-                        )
-                    else:
-                        mag_errs_det = np.asarray(self._sample_sigma_distribution(pixel_means, pixel_stds), dtype=float)
+            # 7. Add noise
+            noise = np.random.normal(0.0, mag_errs_det)
+            mags_measured = mags_valid + noise
+            flux_measured = mag_conversion(mags_measured, convert_to='flux')
+            sigma_flux = np.abs(np.log(10) / 2.5 * np.maximum(flux_measured, 1e-12) * mag_errs_det)
 
-                finite_sigma = np.isfinite(mag_errs_det) & (mag_errs_det > 0)
-                if not np.any(finite_sigma):
-                    return final_mags, final_errs
+            if self.include_limit:
+                detected_after_noise = self._draw_detection_mask(flux_measured, sigma_flux, limit_flux)
+            else:
+                detected_after_noise = np.ones_like(mags_valid, dtype=bool)
 
-                mags_valid = mags_valid[finite_sigma]
-                mag_errs_det = mag_errs_det[finite_sigma]
+            target_idx = np.where(valid_mask)[0][finite_sigma]
+            det_idx = target_idx[detected_after_noise]
 
-                # 7. Add noise
-                noise = np.random.normal(0.0, mag_errs_det)
-                mags_measured = mags_valid + noise
-                flux_measured = mag_conversion(mags_measured, convert_to='flux')
-                sigma_flux = np.abs(np.log(10) / 2.5 * np.maximum(flux_measured, 1e-12) * mag_errs_det)
+            if self.include_sigma:
+                final_mags[det_idx] = mags_measured[detected_after_noise]
+            else:
+                final_mags[det_idx] = mags_valid[detected_after_noise]
 
-                if self.include_limit:
-                    detected_after_noise = self._draw_detection_mask(flux_measured, sigma_flux, limit_flux)
-                else:
-                    detected_after_noise = np.ones_like(mags_valid, dtype=bool)
-
-                target_idx = np.where(valid_mask)[0][finite_sigma]
-                det_idx = target_idx[detected_after_noise]
-
-                if self.include_sigma:
-                    final_mags[det_idx] = mags_measured[detected_after_noise]
-                else:
-                    final_mags[det_idx] = mags_valid[detected_after_noise]
-
-                final_errs[det_idx] = mag_errs_det[detected_after_noise]
+            final_errs[det_idx] = mag_errs_det[detected_after_noise]
 
         return final_mags, final_errs    
 
