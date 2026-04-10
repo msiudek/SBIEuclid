@@ -10,6 +10,7 @@ except ImportError:
 
 from sbipix import sbipix
 from sbipix.plotting import plot_test_performance
+from sbipix.utils.sed_utils import flux_ujy_to_mag, load_filter_metadata
 
 
 def build_parser():
@@ -35,6 +36,12 @@ def build_parser():
         "--skip-train",
         action="store_true",
         help="Skip training and reuse existing model file at model_path/model_name",
+    )
+    p.add_argument(
+        "--mock-match",
+        choices=["none", "vis_yj2d"],
+        default="vis_yj2d",
+        help="Resample mocks to match real observed VIS×(Y-J) prior (default: vis_yj2d)",
     )
     return p
 
@@ -67,9 +74,116 @@ OBS_DIR = PROJECT_ROOT / "obs" / "obs_properties"
 LIB_DIR = PROJECT_ROOT / "library"
 
 ATLAS_NAME  = "atlas_obs_euclid_north_validate"
-MODEL_NAME  = "model_euclid_v1.1.pkl"
+MODEL_NAME  = "model_euclid_v1.2.pkl"
 
 NOISE_PREFIX = "north_2fwhm"
+NONDET_MAG = 99.0
+SNR_DETECTION_THRESHOLD = 2.0
+MAG_BRIGHT = 16.0
+MAG_FAINT = 30.0
+PATCH_ID = 98
+
+_FILTER_META = load_filter_metadata("filters_to_use.dat", filt_dir=str(OBS_DIR))
+FILTER_SHORT = [m["short"] for m in _FILTER_META]
+FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
+
+
+def load_real_mag_for_mock_match(aperture):
+    """Load real detected magnitudes (filter-major arrays) for prior matching."""
+    from astropy.table import Table
+
+    fits_path = OBS_DIR / "COSMOS_DEEP.fits"
+    cat = Table.read(fits_path)
+
+    patch_col = cat["patch_id_list"]
+    try:
+        mask = patch_col == int(PATCH_ID)
+    except (ValueError, TypeError):
+        mask = np.zeros(len(cat), dtype=bool)
+    str_mask = np.array([str(v).strip() == str(PATCH_ID) for v in patch_col])
+    cat = cat[mask | str_mask]
+
+    n_filt = len(FILTER_COL_STEMS)
+    n_gal = len(cat)
+    real_mag = np.full((n_filt, n_gal), np.nan)
+
+    for fi, stem in enumerate(FILTER_COL_STEMS):
+        fcol = f"flux_{stem}_{aperture}_aper"
+        ecol = f"fluxerr_{stem}_{aperture}_aper"
+        if fcol not in cat.colnames:
+            continue
+
+        flux = np.asarray(cat[fcol], dtype=float)
+        err = np.asarray(cat[ecol], dtype=float) if ecol in cat.colnames else np.full(n_gal, np.nan)
+        valid = np.isfinite(flux) & np.isfinite(err) & (err > 0)
+        snr = np.where(valid, flux / err, np.nan)
+        detected = valid & np.isfinite(snr) & (snr >= SNR_DETECTION_THRESHOLD) & (flux > 0)
+        real_mag[fi] = np.where(detected, flux_ujy_to_mag(flux), np.nan)
+
+    return real_mag
+
+
+def compute_mock_match_weights(real_mag, mock_mag):
+    """Compute 2D VIS×(Y-J) histogram ratio weights for mock samples."""
+    n_mock = mock_mag.shape[1]
+    weights = np.zeros(n_mock, dtype=float)
+
+    vis_idx = FILTER_SHORT.index("VIS")
+    y_idx = FILTER_SHORT.index("NISP-Y")
+    j_idx = FILTER_SHORT.index("NISP-J")
+
+    real_vis = real_mag[vis_idx]
+    real_yj = real_mag[y_idx] - real_mag[j_idx]
+    real_ok = np.isfinite(real_vis) & np.isfinite(real_yj)
+
+    mock_vis = mock_mag[vis_idx]
+    mock_yj = mock_mag[y_idx] - mock_mag[j_idx]
+    mock_ok = np.isfinite(mock_vis) & (mock_vis < NONDET_MAG - 0.5) & np.isfinite(mock_yj)
+
+    bins_mag = np.linspace(MAG_BRIGHT, MAG_FAINT, 25)
+    if np.any(real_ok):
+        p1, p99 = np.nanpercentile(real_yj[real_ok], [1, 99])
+        bins_color = np.linspace(p1 - 0.5, p99 + 0.5, 25)
+    else:
+        bins_color = np.linspace(-2.0, 4.0, 25)
+
+    n_real = int(real_ok.sum())
+    n_mock_ok = int(mock_ok.sum())
+    if n_real == 0 or n_mock_ok == 0:
+        return weights, "mock matching skipped: no valid VIS+Y-J objects"
+
+    real_hist, _, _ = np.histogram2d(real_vis[real_ok], real_yj[real_ok], bins=(bins_mag, bins_color))
+    mock_hist, _, _ = np.histogram2d(mock_vis[mock_ok], mock_yj[mock_ok], bins=(bins_mag, bins_color))
+
+    real_pdf = real_hist / n_real
+    mock_pdf = mock_hist / n_mock_ok
+    ratio = real_pdf / (mock_pdf + 1e-6)
+    ratio = np.clip(ratio, 0, 10)
+
+    ix = np.digitize(mock_vis, bins_mag) - 1
+    iy = np.digitize(mock_yj, bins_color) - 1
+    in_range = mock_ok & (ix >= 0) & (ix < ratio.shape[0]) & (iy >= 0) & (iy < ratio.shape[1])
+    weights[in_range] = ratio[ix[in_range], iy[in_range]]
+
+    return weights, (
+        f"mock matching: 2D VIS×(Y-J) histogram 24×24 bins "
+        f"(real n={n_real}, mock detected n={n_mock_ok})"
+    )
+
+
+def draw_resample_indices(weights, n_out, seed=0):
+    """Draw bootstrap indices from positive weights."""
+    weights = np.asarray(weights, dtype=float)
+    valid = np.isfinite(weights) & (weights > 0)
+    if not np.any(valid):
+        return None, "mock matching skipped: all weights are zero"
+
+    probs = weights[valid] / weights[valid].sum()
+    source_idx = np.where(valid)[0]
+    rng = np.random.default_rng(seed)
+    draw_idx = rng.choice(source_idx, size=n_out, replace=True, p=probs)
+    eff_n = (weights[valid].sum() ** 2) / np.sum(weights[valid] ** 2)
+    return draw_idx, f"resampled weighted mock catalogue (effective N ≈ {eff_n:.0f})"
 
 
 # --------------------------------------------------
@@ -138,6 +252,27 @@ sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -30 to 5)")
+
+if args.mock_match != "none":
+    print(f"    Applying mock matching ({args.mock_match})...")
+    aperture = NOISE_PREFIX.split("_", 1)[1] if "_" in NOISE_PREFIX else "2fwhm"
+    real_mag = load_real_mag_for_mock_match(aperture=aperture)
+    mock_mag = sx.mag[:, :, 0].T
+
+    mock_weights, match_msg = compute_mock_match_weights(real_mag, mock_mag)
+    print(f"      {match_msg}")
+    print(f"      non-zero weights: {(mock_weights > 0).sum()} / {mock_weights.size}")
+
+    draw_idx, resample_msg = draw_resample_indices(mock_weights, n_out=len(sx.theta), seed=0)
+    print(f"      {resample_msg}")
+    if draw_idx is not None:
+        sx.theta = sx.theta[draw_idx]
+        sx.mag = sx.mag[draw_idx]
+        sx.obs = sx.obs[draw_idx]
+        sx.n_simulation = len(sx.theta)
+        print(f"      post-match n_simulation: {sx.n_simulation}")
+else:
+    print("    Mock matching disabled (--mock-match none)")
 
 
 
