@@ -637,13 +637,33 @@ def main():
         return
 
     print("[5/5] Testing quick model performance...")
-    posterior_test = sx.test_performance(
-        n_test=min(args.n_test, len(sx.theta)),
-        n_samples=args.n_samples,
-        return_posterior=True,
-        device=args.device,
-        sample_with=args.sample_with,
-    )
+    test_device = args.device
+    try:
+        posterior_test = sx.test_performance(
+            n_test=min(args.n_test, len(sx.theta)),
+            n_samples=args.n_samples,
+            return_posterior=True,
+            device=test_device,
+            sample_with=args.sample_with,
+        )
+    except RuntimeError as exc:
+        msg = str(exc)
+        device_mismatch = (
+            ("Expected all tensors to be on the same device" in msg)
+            or ("cuda" in msg.lower() and "cpu" in msg.lower() and "device" in msg.lower())
+        )
+        if test_device == "cuda" and device_mismatch:
+            print("    WARNING: CUDA/CPU tensor mismatch while loading existing model; retrying test on CPU.")
+            test_device = "cpu"
+            posterior_test = sx.test_performance(
+                n_test=min(args.n_test, len(sx.theta)),
+                n_samples=args.n_samples,
+                return_posterior=True,
+                device=test_device,
+                sample_with=args.sample_with,
+            )
+        else:
+            raise
 
     theta_true_phys = sx.theta.copy()
     if args.theta_normalization == "zscore" and theta_mu is not None and theta_sigma is not None:
@@ -655,6 +675,7 @@ def main():
         )
 
     print(f"Posterior test shape: {posterior_test.shape}")
+    print(f"    Test device used: {test_device}")
 
     if not args.no_plot_test:
         from sbipix.plotting import plot_test_performance
