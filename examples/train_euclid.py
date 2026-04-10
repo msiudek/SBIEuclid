@@ -19,7 +19,7 @@ def build_parser():
         "--params",
         choices=["all", "mass_sfr"],
         default="mass_sfr",
-        help="Parameter set to infer: all atlas parameters or only [logM, logMformed, logSFR]",
+        help="Parameter set to infer: all atlas parameters or only [logM, logSFR]",
     )
     p.add_argument(
         "--smoke-test",
@@ -74,7 +74,7 @@ OBS_DIR = PROJECT_ROOT / "obs" / "obs_properties"
 LIB_DIR = PROJECT_ROOT / "library"
 
 ATLAS_NAME  = "atlas_obs_euclid_north_validate"
-MODEL_NAME  = "model_euclid_v1.2.pkl"
+MODEL_NAME  = "model_euclid_v1.3.pkl"
 
 NOISE_PREFIX = "north_2fwhm"
 NONDET_MAG = 99.0
@@ -284,16 +284,16 @@ print(f"[3/5] Selecting parameters ({args.params})...")
 # theta column order is fixed: 0=logM*, 1=logM*_formed, 2=logSFR,
 #                               3=tau, 4=t_i, 5=[M/H], 6=Av, 7=z
 if args.params == "mass_sfr":
-    PARAM_IDXS = [0, 1, 2]
-    PARAM_NAMES = ["logM", "logMformed", "logSFR"]
+    PARAM_IDXS = [0, 2]
+    PARAM_NAMES = ["logM", "logSFR"]
     sx.theta = sx.theta[:, PARAM_IDXS]
     sx.labels = PARAM_NAMES
     # Important: with infer_z=False, sbipix.train() treats the last theta
     # column as known redshift and removes it from inferred targets.
-    # For mass_sfr we want 3 inferred parameters, so enable infer_z mode.
+    # For mass_sfr we want all selected parameters inferred, so enable infer_z mode.
     sx.infer_z = True
     print(f"    Using columns: {PARAM_IDXS} -> {PARAM_NAMES}")
-    print("    infer_z=True for mass_sfr mode (infer all 3 selected parameters)")
+    print("    infer_z=True for mass_sfr mode (infer all selected parameters)")
 else:
     print(f"    Using all parameters: {sx.theta.shape[1]} dimensions")
 
