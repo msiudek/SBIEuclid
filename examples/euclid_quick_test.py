@@ -3,6 +3,7 @@ import argparse
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from sbipix.utils.sed_utils import flux_ujy_to_mag, load_filter_metadata
 
 
 def build_parser():
@@ -32,6 +33,9 @@ def build_parser():
     parser.add_argument("--atlas-name", default=None,
                         help="Override atlas name (default: auto-generated from noise-prefix). "
                              "Use to point to an existing atlas, e.g. atlas_obs_euclid_north_2fwhm_validate_10000")
+    parser.add_argument("--model-name", default=None,
+                        help="Override model name (default: auto-generated from noise-prefix). "
+                             "Use to point to an existing trained model, e.g. model_euclid_v1.3.pkl")
     # Noise configuration options
     parser.add_argument("--noise-prefix", default="north_2fwhm",
                         choices=["north_2fwhm", "north_3fwhm"],
@@ -43,13 +47,13 @@ def build_parser():
                         choices=["hard", "probabilistic"],
                         help="Detection model (default: probabilistic)")
     parser.add_argument("--sigma-sampler", default="empirical",
-                        choices=["empirical", "truncnorm", "lognormal"],
+                        choices=["empirical", "truncnorm", "lognormal", "mag_lognormal"],
                         help="Sigma sampler distribution (default: empirical)")
     parser.add_argument("--fits-file", default="obs/obs_properties/COSMOS_DEEP.fits",
                         help="Real COSMOS-Deep FITS file for mock matching")
     parser.add_argument("--patch-id", type=int, default=98,
                         help="Patch ID for real data matching (default: 98)")
-    parser.add_argument("--mock-match", choices=["none", "vis1d", "vis_color2d"], default="none",
+    parser.add_argument("--mock-match", choices=["none", "vis1d", "vis_color2d", "vis_yj2d"], default="none",
                         help="Optional real-data matching for training mocks (default: none)")
     parser.add_argument("--mock-match-band", default="VIS",
                         help="Band used for mock matching (default: VIS)")
@@ -59,7 +63,7 @@ def build_parser():
                         help="Number of bins for mock matching histograms (default: 24)")
     parser.add_argument("--mock-match-alpha", type=float, default=0.7,
                         help="Smoothing factor for mock-match weights: probs = alpha*w + (1-alpha)/N (default: 0.7)")
-    parser.add_argument("--target-params", choices=["all", "no_tau_met"], default="no_tau_met",
+    parser.add_argument("--target-params", choices=["all", "no_tau_met", "mass_sfr"], default="no_tau_met",
                         help="Target parameter set for training (default: no_tau_met)")
     parser.add_argument("--theta-normalization", choices=["none", "zscore"], default="zscore",
                         help="Normalization for target parameters before training (default: zscore)")
@@ -273,6 +277,118 @@ def _plot_pp_and_sbc(posterior_test, theta_true, labels, out_dir):
         plt.close()
 
 
+NONDET_MAG = 99.0
+SNR_DETECTION_THRESHOLD = 2.0
+MAG_BRIGHT = 16.0
+MAG_FAINT = 30.0
+
+
+def _load_real_mag_for_mock_match(project_root, fits_file, patch_id, aperture, filter_col_stems):
+    from astropy.table import Table
+
+    fits_path = Path(fits_file)
+    if not fits_path.is_absolute():
+        fits_path = project_root / fits_path
+
+    cat = Table.read(fits_path)
+
+    patch_col = cat["patch_id_list"]
+    try:
+        mask = patch_col == int(patch_id)
+    except (ValueError, TypeError):
+        mask = np.zeros(len(cat), dtype=bool)
+    str_mask = np.array([str(v).strip() == str(patch_id) for v in patch_col])
+    cat = cat[mask | str_mask]
+
+    n_filt = len(filter_col_stems)
+    n_gal = len(cat)
+    real_mag = np.full((n_filt, n_gal), np.nan)
+
+    for fi, stem in enumerate(filter_col_stems):
+        fcol = f"flux_{stem}_{aperture}_aper"
+        ecol = f"fluxerr_{stem}_{aperture}_aper"
+        if fcol not in cat.colnames:
+            continue
+
+        flux = np.asarray(cat[fcol], dtype=float)
+        err = np.asarray(cat[ecol], dtype=float) if ecol in cat.colnames else np.full(n_gal, np.nan)
+        valid = np.isfinite(flux) & np.isfinite(err) & (err > 0)
+        snr = np.where(valid, flux / err, np.nan)
+        detected = valid & np.isfinite(snr) & (snr >= SNR_DETECTION_THRESHOLD) & (flux > 0)
+        real_mag[fi] = np.where(detected, flux_ujy_to_mag(flux), np.nan)
+
+    return real_mag
+
+
+def _compute_mock_match_weights(real_mag, mock_mag, filter_short, mode, match_band="VIS", n_bins=24):
+    n_mock = mock_mag.shape[1]
+    weights = np.zeros(n_mock, dtype=float)
+
+    band_idx = filter_short.index(match_band)
+    mock_band = mock_mag[band_idx]
+    mock_band_ok = np.isfinite(mock_band) & (mock_band < NONDET_MAG - 0.5)
+    real_band = real_mag[band_idx]
+    real_band_ok = np.isfinite(real_band)
+
+    bins_mag = np.linspace(MAG_BRIGHT, MAG_FAINT, n_bins + 1)
+
+    if mode == "vis1d":
+        n_real = int(real_band_ok.sum())
+        n_mock_ok = int(mock_band_ok.sum())
+        if n_real == 0 or n_mock_ok == 0:
+            return weights, f"mock matching skipped: no valid {match_band} detections"
+
+        real_hist, _ = np.histogram(real_band[real_band_ok], bins=bins_mag)
+        mock_hist, _ = np.histogram(mock_band[mock_band_ok], bins=bins_mag)
+        ratio = (real_hist / n_real) / (mock_hist / n_mock_ok + 1e-6)
+        ratio = np.clip(ratio, 0, 10)
+        ix = np.digitize(mock_band, bins_mag) - 1
+        in_range = mock_band_ok & (ix >= 0) & (ix < ratio.shape[0])
+        weights[in_range] = ratio[ix[in_range]]
+        return weights, (
+            f"mock matching: 1D {match_band} histogram {n_bins} bins "
+            f"(real n={n_real}, mock detected n={n_mock_ok})"
+        )
+
+    if mode in {"vis_color2d", "vis_yj2d"}:
+        vis_idx = filter_short.index("VIS")
+        y_idx = filter_short.index("NISP-Y")
+        j_idx = filter_short.index("NISP-J")
+
+        real_vis = real_mag[vis_idx]
+        real_yj = real_mag[y_idx] - real_mag[j_idx]
+        real_ok = np.isfinite(real_vis) & np.isfinite(real_yj)
+
+        mock_vis = mock_mag[vis_idx]
+        mock_yj = mock_mag[y_idx] - mock_mag[j_idx]
+        mock_ok = np.isfinite(mock_vis) & (mock_vis < NONDET_MAG - 0.5) & np.isfinite(mock_yj)
+
+        if np.any(real_ok):
+            p1, p99 = np.nanpercentile(real_yj[real_ok], [1, 99])
+            bins_color = np.linspace(p1 - 0.5, p99 + 0.5, n_bins + 1)
+        else:
+            bins_color = np.linspace(-2.0, 4.0, n_bins + 1)
+
+        n_real = int(real_ok.sum())
+        n_mock_ok = int(mock_ok.sum())
+        if n_real == 0 or n_mock_ok == 0:
+            return weights, "mock matching skipped: no valid VIS+Y-J objects"
+
+        real_hist, _, _ = np.histogram2d(real_vis[real_ok], real_yj[real_ok], bins=(bins_mag, bins_color))
+        mock_hist, _, _ = np.histogram2d(mock_vis[mock_ok], mock_yj[mock_ok], bins=(bins_mag, bins_color))
+        ratio = (real_hist / n_real) / (mock_hist / n_mock_ok + 1e-6)
+        ratio = np.clip(ratio, 0, 10)
+
+        ix = np.digitize(mock_vis, bins_mag) - 1
+        iy = np.digitize(mock_yj, bins_color) - 1
+        in_range = mock_ok & (ix >= 0) & (ix < ratio.shape[0]) & (iy >= 0) & (iy < ratio.shape[1])
+        weights[in_range] = ratio[ix[in_range], iy[in_range]]
+        return weights, (
+            f"mock matching: 2D VIS×(Y-J) histogram {n_bins}×{n_bins} bins "
+            f"(real n={n_real}, mock detected n={n_mock_ok})"
+        )
+
+    return weights, f"mock matching skipped: unsupported mode '{mode}'"
 def main():
     args = build_parser().parse_args()
 
@@ -289,6 +405,10 @@ def main():
         logs_dir = logs_dir / args.run_name
     library_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    filter_meta = load_filter_metadata("filters_to_use.dat", filt_dir=str(obs_dir))
+    filter_short = [m["short"] for m in filter_meta]
+    filter_col_stems = [m["col_stem"] for m in filter_meta]
 
     np.random.seed(42)
 
@@ -307,7 +427,7 @@ def main():
     sx.atlas_path = str(library_dir) + "/"
     sx.model_path = str(library_dir) + "/"
     sx.atlas_name = args.atlas_name if args.atlas_name else f"atlas_obs_euclid_{args.noise_prefix}_quick"
-    sx.model_name = f"post_obs_euclid_{args.noise_prefix}_quick.pkl"
+    sx.model_name = args.model_name if args.model_name else f"post_obs_euclid_{args.noise_prefix}_quick.pkl"
 
     sx.n_simulation = args.n_sim
     sx.parametric = True
@@ -366,16 +486,20 @@ def main():
     if args.test_only and args.mock_match != "none":
         print("    NOTE: ignoring mock matching in --test-only mode to avoid evaluation distribution shift")
     elif args.mock_match != "none":
-        from validate_noise_model import load_real_data, get_mock_arrays, compute_mock_match_weights
-
-        real_data = load_real_data(args.fits_file, patch_id=args.patch_id, aperture=args.aperture)
-        mock_data = get_mock_arrays(sx)
-        mock_weights, match_msg = compute_mock_match_weights(
-            real_data,
-            mock_data,
+        real_mag = _load_real_mag_for_mock_match(
+            project_root,
+            args.fits_file,
+            args.patch_id,
+            args.aperture,
+            filter_col_stems,
+        )
+        mock_mag = sx.mag[:, :, 0].T
+        mock_weights, match_msg = _compute_mock_match_weights(
+            real_mag,
+            mock_mag,
+            filter_short,
             mode=args.mock_match,
             match_band=args.mock_match_band,
-            color_band=args.mock_match_color_band,
             n_bins=args.mock_match_bins,
         )
         valid = np.isfinite(mock_weights) & (mock_weights > 0)
@@ -420,6 +544,13 @@ def main():
             sx.theta = sx.theta[:, keep_idx]
             sx.labels = [sx.labels[i] for i in keep_idx]
             print(f"    Dropped target parameters: {', '.join(dropped_labels)}")
+    elif args.target_params == "mass_sfr":
+        param_idxs = [0, 2]
+        sx.theta = sx.theta[:, param_idxs]
+        sx.labels = [sx.labels[i] for i in param_idxs]
+        sx.infer_z = True
+        print(f"    Using target parameters: {', '.join(sx.labels)}")
+        print("    infer_z=True for mass_sfr mode")
 
     theta_mu = None
     theta_sigma = None
