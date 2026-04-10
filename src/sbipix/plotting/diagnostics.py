@@ -22,6 +22,7 @@ from tqdm import tqdm, trange
 import os
 import h5py
 import glob
+import pickle
 from matplotlib.lines import Line2D
 
 # Set matplotlib parameters
@@ -116,7 +117,7 @@ def plot_theta(sbipix_model, bins=50, limit_sfr=False, range_sfr=(-10, 2),
     plt.tight_layout()
     
     if save:
-        save_name = filename or 'parameter_histograms.pdf'
+        save_name = filename or 'parameter_histograms.png'
         plt.savefig(save_name, bbox_inches='tight', dpi=300)
         print(f"Saved plot to {save_name}")
     
@@ -257,6 +258,101 @@ def plot_test_performance(sbipix_model, n_test=1000, n_theta=None, save=False,
             print(f"Saved plot to {filename}")
         
         plt.show()
+
+
+def plot_training_history(sbipix_model, save=False, filename=None, figsize=(7, 5)):
+    """
+    Plot training/validation log-probability history from saved SNPE object.
+
+    Parameters
+    ----------
+    sbipix_model : SBIPIX
+        SBIPIX model instance with model_path/model_name configured.
+    save : bool, optional
+        Whether to save plot (default: False)
+    filename : str, optional
+        Output filename if save=True.
+    figsize : tuple, optional
+        Figure size (default: (7, 5)).
+
+    Returns
+    -------
+    str or None
+        Saved filename if save=True and history exists, else None.
+    """
+    anpe_file = sbipix_model.model_path + 'anpe_' + sbipix_model.model_name
+    if not os.path.exists(anpe_file):
+        print(f"Training history skipped: file not found: {anpe_file}")
+        return None
+
+    try:
+        with open(anpe_file, 'rb') as f:
+            anpe = pickle.load(f)
+    except Exception as exc:
+        print(f"Training history skipped: could not load {anpe_file} ({exc})")
+        return None
+
+    summary = getattr(anpe, 'summary', None)
+    if summary is None:
+        summary = getattr(anpe, '_summary', None)
+    if summary is None:
+        print("Training history skipped: no summary found on SNPE object")
+        return None
+
+    train_hist = summary.get('training_log_probs', None)
+    val_hist = summary.get('validation_log_probs', None)
+    y_label = 'Log probability'
+    title = 'SNPE training history'
+    best_val = summary.get('best_validation_log_prob', None)
+
+    if train_hist is None and val_hist is None:
+        train_hist = summary.get('training_loss', None)
+        val_hist = summary.get('validation_loss', None)
+        y_label = 'Loss'
+        title = 'SNPE training loss history'
+        best_val = summary.get('best_validation_loss', best_val)
+
+    if train_hist is None and val_hist is None:
+        print("Training history skipped: no training/validation curves in summary")
+        return None
+
+    plt.figure(figsize=figsize)
+    if train_hist is not None and len(train_hist) > 0:
+        plt.plot(np.arange(1, len(train_hist) + 1), train_hist, label='Train', lw=2)
+    if val_hist is not None and len(val_hist) > 0:
+        plt.plot(np.arange(1, len(val_hist) + 1), val_hist, label='Validation', lw=2)
+
+    if best_val is not None:
+        try:
+            best_val_scalar = float(np.ravel(best_val)[-1])
+            if np.isfinite(best_val_scalar):
+                plt.axhline(
+                    best_val_scalar,
+                    ls='--',
+                    lw=1.5,
+                    color='k',
+                    alpha=0.6,
+                    label=f'Best val={best_val_scalar:.3f}',
+                )
+        except Exception:
+            pass
+
+    plt.xlabel('Epoch')
+    plt.ylabel(y_label)
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='best')
+    plt.tight_layout()
+
+    out = None
+    if save:
+        os.makedirs('./sbi-logs', exist_ok=True)
+        out = filename or './sbi-logs/training_history.png'
+        plt.savefig(out, bbox_inches='tight', dpi=150)
+        print(f"Saved plot to {out}")
+
+    plt.show()
+    return out
 
 
 def plot_performance_obs_from_catalog(sbipix_model, parameter='z', save=False, 

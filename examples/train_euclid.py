@@ -9,7 +9,7 @@ except ImportError:
     _DEVICE = "cpu"
 
 from sbipix import sbipix
-from sbipix.plotting import plot_test_performance
+from sbipix.plotting import plot_test_performance, plot_training_history
 from sbipix.utils.sed_utils import flux_ujy_to_mag, load_filter_metadata
 
 
@@ -377,3 +377,12 @@ plot_test_performance(
     name=plot_name,
 )
 print(f"Saved: sbi-logs/{plot_name}*.png")
+
+history_name = f"./sbi-logs/training_history_{args.params}.png"
+history_file = plot_training_history(
+    sx,
+    save=True,
+    filename=history_name,
+)
+if history_file:
+    print(f"Saved: {history_file}")
