@@ -32,10 +32,12 @@ import sys
 # Shared utilities from sbipix
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sbipix.utils.sed_utils import (
+    convert_to_microjansky,
     flux_ujy_to_mag,
     flux_ujy_to_mag_err,
     mag_to_flux_ujy,
     load_filter_metadata,
+    sfh_delayed_exponential,
 )
 from sbipix.utils.validation_plots import (
     plot_sigma_vs_mag,
@@ -313,6 +315,154 @@ def apply_mag_calibration(real_data, mock_data):
     mock_data_cal = dict(mock_data)
     mock_data_cal["mag"] = mock_mag_cal
     return mock_data_cal, delta_mag
+
+
+def debug_fsps_output_units_once():
+    """Print FSPS spectrum scale for peraa=False vs peraa=True."""
+    try:
+        import fsps
+    except Exception as exc:
+        print(f"FSPS unit debug skipped: could not import fsps ({exc})")
+        return
+
+    try:
+        sp = fsps.StellarPopulation(
+            zcontinuous=1,
+            sfh=3,
+            dust_type=2,
+        )
+
+        # Minimal flat SFH just to probe FSPS output units/scales.
+        t = np.linspace(0.001, 1.0, 200)
+        sfh = np.full_like(t, 1e-3)
+        sp.set_tabular_sfh(t, sfh)
+
+        _, spec_per_hz = sp.get_spectrum(tage=1.0, peraa=False)
+        _, spec_per_aa = sp.get_spectrum(tage=1.0, peraa=True)
+
+        L_sun = 3.828e33
+        spec_erg_hz = spec_per_hz * L_sun
+        spec_erg_aa = spec_per_aa * L_sun
+
+        print("FSPS unit debug:")
+        print(
+            "  peraa=False -> FSPS returns Lsun/Hz; "
+            f"spec_erg range = [{np.nanmin(spec_erg_hz):.3e}, {np.nanmax(spec_erg_hz):.3e}]"
+        )
+        print(
+            "  peraa=True  -> FSPS returns Lsun/A;  "
+            f"spec_erg range = [{np.nanmin(spec_erg_aa):.3e}, {np.nanmax(spec_erg_aa):.3e}]"
+        )
+    except Exception as exc:
+        print(f"FSPS unit debug failed: {exc}")
+
+
+def debug_mass_flux_scaling_fixed_nuisance(model, target_masses=(9.0, 10.0, 11.0)):
+    """
+    Check mass scaling in two ways:
+      (1) covariance diagnostics in loaded atlas
+      (2) strict manual FSPS regeneration with fixed nuisance parameters
+
+    Expects theta order:
+      0=logM*, 2=logSFR, 3=tau, 4=t_i, 5=[M/H], 6=Av, 7=z
+    """
+    if model.theta is None or model.obs is None or len(model.theta) < 3:
+        print("Mass-scaling debug skipped: model.theta/model.obs not available")
+        return
+
+    logm_all = np.asarray(model.theta[:, 0], dtype=float)
+    logsfr_all = np.asarray(model.theta[:, 2], dtype=float)
+    logssfr_all = logsfr_all - logm_all
+    flux_med_all = np.nanmedian(mag_to_flux_ujy(model.obs), axis=1)
+    good = (
+        np.isfinite(logm_all)
+        & np.isfinite(logssfr_all)
+        & np.isfinite(flux_med_all)
+        & (flux_med_all > 0)
+    )
+
+    print("Mass-scaling debug: covariance in loaded atlas")
+    corr_m_ssfr = np.corrcoef(logm_all[good], logssfr_all[good])
+    print("  corrcoef(logM, log_sSFR):")
+    print(corr_m_ssfr)
+
+    logf_all = np.log10(flux_med_all[good])
+    corr_triplet = np.corrcoef(np.vstack([logm_all[good], logssfr_all[good], logf_all]))
+    print("  corrcoef([logM, log_sSFR, log10(median_flux)]):")
+    print(corr_triplet)
+
+    X = np.column_stack([logm_all[good], logssfr_all[good], np.ones(good.sum())])
+    beta, *_ = np.linalg.lstsq(X, logf_all, rcond=None)
+    print(
+        "  linear fit log10(flux)=a*logM + b*log_sSFR + c: "
+        f"a={beta[0]:.3f}, b={beta[1]:.3f}, c={beta[2]:.3f}"
+    )
+
+    print("Mass-scaling debug: strict manual FSPS regeneration (fixed nuisance)")
+    try:
+        import fsps
+        from astropy.cosmology import FlatLambdaCDM
+    except Exception as exc:
+        print(f"  manual FSPS debug skipped: {exc}")
+        return
+
+    tau_fix = float(np.nanmedian(model.theta[:, 3]))
+    ti_fix = float(np.nanmedian(model.theta[:, 4]))
+    met_fix = float(np.nanmedian(model.theta[:, 5]))
+    av_fix = float(np.nanmedian(model.theta[:, 6]))
+    z_fix = float(np.nanmedian(model.theta[:, 7]))
+
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+    age_gyr = float(cosmo.age(z_fix).value)
+    t = np.linspace(0.001, age_gyr, 1000)
+
+    sp = fsps.StellarPopulation(zcontinuous=1, sfh=3, dust_type=2)
+    sp.params['cloudy_dust'] = True
+    sp.params['gas_logu'] = -2
+    sp.params['add_igm_absorption'] = True
+    sp.params['add_neb_emission'] = True
+    sp.params['add_neb_continuum'] = True
+    sp.params['imf_type'] = 1
+    sp.params['dust2'] = av_fix
+    sp.params['logzsol'] = met_fix
+    sp.params['gas_logz'] = met_fix
+    sp.params['zred'] = z_fix
+
+    print(
+        f"  fixed nuisance: z={z_fix:.3f}, Av={av_fix:.3f}, [M/H]={met_fix:.3f}, "
+        f"tau={tau_fix:.3f}, ti={ti_fix:.3f}"
+    )
+
+    out = []
+    for logm in target_masses:
+        sfh_gyr, t_axis = sfh_delayed_exponential(t, logmassval=float(logm), tau=tau_fix, ti=ti_fix)
+        sfh_yr = sfh_gyr / 1e9
+        sfh_yr = np.where(np.isnan(sfh_yr) | (sfh_yr < 1e-33), 1e-33, sfh_yr)
+
+        sp.set_tabular_sfh(t_axis, sfh_yr)
+        _, spec = sp.get_spectrum(tage=age_gyr + 1e-4, peraa=False)
+        flux_ujy = convert_to_microjansky(spec, z_fix, cosmo)
+        med_flux = float(np.nanmedian(flux_ujy))
+
+        recent_sfr = float(np.mean(sfh_yr[-100:]))
+        logssfr = np.log10(max(recent_sfr, 1e-300)) - float(logm)
+        out.append((float(logm), med_flux, logssfr))
+
+    for logm, med_flux, logssfr in out:
+        print(f"  logM={logm:.1f}, median_flux={med_flux:.6e} uJy, log_sSFR={logssfr:.3f}")
+
+    logm = np.array([row[0] for row in out], dtype=float)
+    logf = np.log10(np.array([max(row[1], 1e-300) for row in out], dtype=float))
+    slope, intercept = np.polyfit(logm, logf, 1)
+    print(f"  strict slope log10(flux) vs logM = {slope:.6f} (expected 1.0)")
+    print(f"  strict intercept = {intercept:.6f}")
+
+    strict_logssfr = np.array([row[2] for row in out], dtype=float)
+    print("  strict corrcoef(logM, log_sSFR):")
+    if np.nanstd(strict_logssfr) < 1e-12:
+        print("  undefined (log_sSFR is fixed by construction; zero variance)")
+    else:
+        print(np.corrcoef(logm, strict_logssfr))
 
 
 def debug_flux_scale(real_data, mock_data):
@@ -621,24 +771,33 @@ def main():
     print(f"  limits file    = {limits_file}")
     print(f"  sigma sampler  = {model.noise_sigma_sampler}")
     print(f"  detect model   = {model.noise_detection_model}")
+    print(f"  mock match     = {args.mock_match}")
+    print(f"  calibrate      = {'on' if args.calibrate else 'off'}")
     print(f"  det SNR cut    = {SNR_DETECTION_THRESHOLD}")
 
     np.random.seed(0)
 
     load_or_simulate_model(model, args, outdir)
 
-    print("Checking luminosity scaling...")
-    # model.obs stores noiseless magnitudes (n_sim, n_filt); convert to flux for comparison
-    m1 = model.theta[0, 0]
-    m2 = model.theta[1, 0]
-    f1 = float(np.nanmedian(mag_to_flux_ujy(model.obs[0])))
-    f2 = float(np.nanmedian(mag_to_flux_ujy(model.obs[1])))
-    print(f"  logM1={m1:.2f}, median_flux1={f1:.3e} uJy")
-    print(f"  logM2={m2:.2f}, median_flux2={f2:.3e} uJy")
-    if f1 > 0 and f2 > 0:
-        print(f"  flux ratio = {f2/f1:.2f}, expected ~ {10**(m2-m1):.2f}")
+    debug_fsps_output_units_once()
+
+    if model.theta is not None and model.obs is not None and len(model.theta) >= 2:
+        print("Checking luminosity scaling...")
+        # model.obs stores noiseless magnitudes (n_sim, n_filt); convert to flux for comparison
+        m1 = model.theta[0, 0]
+        m2 = model.theta[1, 0]
+        f1 = float(np.nanmedian(mag_to_flux_ujy(model.obs[0])))
+        f2 = float(np.nanmedian(mag_to_flux_ujy(model.obs[1])))
+        print(f"  logM1={m1:.2f}, median_flux1={f1:.3e} uJy")
+        print(f"  logM2={m2:.2f}, median_flux2={f2:.3e} uJy")
+        if f1 > 0 and f2 > 0:
+            print(f"  flux ratio = {f2/f1:.2f}, expected ~ {10**(m2-m1):.2f}")
+        else:
+            print("  flux ratio: skipped (non-positive flux)")
+
+        debug_mass_flux_scaling_fixed_nuisance(model, target_masses=(9.0, 10.0, 11.0))
     else:
-        print("  flux ratio: skipped (non-positive flux)")
+        print("Checking luminosity scaling... skipped (theta/obs unavailable)")
 
     print("[2/3] Applying observational realism...")
     model.load_obs_features()
