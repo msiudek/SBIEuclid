@@ -246,12 +246,12 @@ print(f"    {len(sx.theta)} valid galaxies (after NaN cleaning)")
 
 # Clip to physical parameter ranges
 phys_ok = (sx.theta[:, 0] > 4.0) & (sx.theta[:, 0] < 13.0) & \
-          (sx.theta[:, 2] > -30.0) & (sx.theta[:, 2] < 5.0)
+          (sx.theta[:, 2] > -4.0) & (sx.theta[:, 2] < 3.0)
 sx.theta = sx.theta[phys_ok]
 sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
-print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -30 to 5)")
+print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
 
 if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
