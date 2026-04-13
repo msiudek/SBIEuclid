@@ -15,6 +15,31 @@ import dense_basis as db
 from ..utils.sed_utils import sfh_delayed_exponential, convert_to_microjansky
 
 
+def calc_fnu_sed_lam_weighted(fnuspec, filcurves, lam_z):
+    """
+    Filter integration with λ-weighting (photon-counting detector formula).
+
+    Computes:  filvals[i] = Σ T(λ)·F_ν(λ)·λ  /  Σ T(λ)·λ
+
+    This is the correct formula for CCD/NIR photon-counting detectors where the
+    detector response is proportional to photon count (∝ λ) rather than energy.
+    Compare to the unweighted formula used in dense_basis.calc_fnu_sed_fast:
+        filvals[i] = Σ T(λ)·F_ν(λ)  /  Σ T(λ)   (energy-detector, uniform-grid)
+    """
+    filvals = np.zeros(filcurves.shape[1])
+    for tindex in range(filcurves.shape[1]):
+        nonzero = filcurves[:, tindex] > 0
+        T = filcurves[nonzero, tindex]
+        F = fnuspec[nonzero]
+        L = lam_z[nonzero]
+        denom = np.sum(T * L)
+        if denom > 0:
+            filvals[tindex] = np.sum(T * F * L) / denom
+        else:
+            filvals[tindex] = 0.0
+    return filvals
+
+
 def _to_scalar(value):
     """Convert scalar-like/array-like prior sample to a Python float."""
     arr = np.asarray(value)
@@ -178,7 +203,7 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
 
             # Use pre-computed filter grid
             fc_index = np.argmin(np.abs(zval - fc_zgrid))
-            sed = db.calc_fnu_sed_fast(spec_ujy, fcs[:, :, fc_index])
+            sed = calc_fnu_sed_lam_weighted(spec_ujy, fcs[:, :, fc_index], lzs[:, fc_index])
 
         # Normalization
         norm_fac = 1.0
@@ -313,10 +338,10 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
             return lam, spec_ujy
         else:
             # Generate photometric SED using dense_basis
-            filcurves, _, _ = db.make_filvalkit_simple(
+            filcurves, lam_z_filt, _ = db.make_filvalkit_simple(
                 lam, zval, fkit_name=filter_list, filt_dir=filt_dir
             )
-            sed = db.calc_fnu_sed_fast(spec_ujy, filcurves)
+            sed = calc_fnu_sed_lam_weighted(spec_ujy, filcurves, lam_z_filt)
             return sed
     else:
         # Interpolate to given wavelength array

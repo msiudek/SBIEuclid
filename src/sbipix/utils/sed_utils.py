@@ -201,10 +201,7 @@ def convert_to_microjansky(spec, zval, cosmo):
     spec_erg = spec * L_sun
     
     # Convert to flux at Earth: F = L / (4π d_L² (1+z)).
-    # NOTE: we currently keep the (1+z) dimming term enabled (physics-motivated).
-    # For controlled A/B tests against older atlases, you can temporarily remove this factor.
     flux_erg = spec_erg / (4 * np.pi * d_L**2 * (1 + zval))
-    
     # Convert to Jansky (1 Jy = 1e-23 erg/s/cm²/Hz)
     flux_jy = flux_erg / 1e-23
     
