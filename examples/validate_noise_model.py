@@ -415,6 +415,8 @@ def debug_mass_flux_scaling_fixed_nuisance(model, target_masses=(9.0, 10.0, 11.0
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     age_gyr = float(cosmo.age(z_fix).value)
     t = np.linspace(0.001, age_gyr, 1000)
+    print(f"  cosmic age: {cosmo.age(z_fix).value:.6f} Gyr")
+    print(f"  sfh time max: {np.max(t):.6f} Gyr")
 
     sp = fsps.StellarPopulation(zcontinuous=1, sfh=3, dust_type=2)
     sp.params['cloudy_dust'] = True
@@ -725,8 +727,8 @@ def build_parser():
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", "--skip-sim", action="store_true",
                    help="Skip simulation step; load existing atlas instead")
-    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal", "mag_lognormal"], default="empirical",
-                   help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
+    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal", "mag_lognormal", "mag_empirical_interp"], default="mag_empirical_interp",
+                   help="Distribution used to sample sigma values (default: mag_empirical_interp; interpolates empirical median/std sigma vs true mag per band)")
     p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
     p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="vis_yj2d",
@@ -765,6 +767,11 @@ def main():
             "Requested --sigma-sampler mag_lognormal, but loaded sbipix does not support it. "
             "Ensure you run from this repo and that local src/ is used (or reinstall package in editable mode)."
         )
+    if args.sigma_sampler == "mag_empirical_interp" and not hasattr(model, "_sample_sigma_mag_empirical_interp"):
+        raise RuntimeError(
+            "Requested --sigma-sampler mag_empirical_interp, but loaded sbipix does not support it. "
+            "Ensure you run from this repo and that local src/ is used (or reinstall package in editable mode)."
+        )
 
     print("Noise-model settings:")
     print(f"  noise prefix   = {noise_prefix}")
@@ -778,6 +785,17 @@ def main():
     np.random.seed(0)
 
     load_or_simulate_model(model, args, outdir)
+
+    debug_i = 0
+    debug_band = 0
+    debug_band_name = FILTER_SHORT[debug_band] if debug_band < len(FILTER_SHORT) else f"band_{debug_band}"
+    raw_flux_debug = np.nan
+    if model.obs is not None and len(model.obs) > debug_i and model.obs.shape[1] > debug_band:
+        raw_mag_debug = float(model.obs[debug_i, debug_band])
+        raw_flux_debug = float(mag_to_flux_ujy(raw_mag_debug))
+        print("\n=== DEBUG: RAW ATLAS FLUX ===")
+        print(f"  galaxy={debug_i}, band={debug_band} ({debug_band_name})")
+        print(f"  Atlas flux (pre-noise): {raw_flux_debug:.3e} uJy")
 
     debug_fsps_output_units_once()
 
@@ -803,6 +821,15 @@ def main():
     model.load_obs_features()
     model.add_noise_nan_limit_all()
 
+    if model.mag is not None and len(model.mag) > debug_i and model.mag.shape[1] > debug_band:
+        noisy_mag_debug = float(model.mag[debug_i, debug_band, 0])
+        noisy_flux_debug = float(mag_to_flux_ujy(noisy_mag_debug))
+        print("\n=== DEBUG: AFTER NOISE ===")
+        print(f"  galaxy={debug_i}, band={debug_band} ({debug_band_name})")
+        print(f"  Noisy flux: {noisy_flux_debug:.3e} uJy")
+        if np.isfinite(raw_flux_debug) and raw_flux_debug > 0:
+            print(f"  Noisy/Raw flux ratio: {noisy_flux_debug/raw_flux_debug:.3f}")
+
     # Clean up NaN thetas
     ok = np.isfinite(np.sum(model.theta, axis=1))
     model.theta = model.theta[ok]
@@ -823,6 +850,22 @@ def main():
     # Extract mock arrays  +  noiseless SED mags
     # ------------------------------------------------------------------
     mock_data = get_mock_arrays(model)
+
+    # Single-band median mock/real flux check (requested quick ratio sanity)
+    real_flux_band = real_data["flux"][debug_band]
+    mock_mag_band = mock_data["mag"][debug_band]
+    mock_flux_band = mag_to_flux_ujy(mock_mag_band)
+    real_ok = np.isfinite(real_flux_band) & (real_flux_band > 0)
+    mock_ok = np.isfinite(mock_mag_band) & (mock_mag_band < NONDET_MAG - 0.5)
+    if np.any(real_ok) and np.any(mock_ok):
+        real_med = float(np.nanmedian(real_flux_band[real_ok]))
+        mock_med = float(np.nanmedian(mock_flux_band[mock_ok]))
+        ratio = mock_med / real_med if real_med > 0 else np.nan
+        print("\n=== DEBUG: MOCK VS REAL FLUX (single band) ===")
+        print(f"  band={debug_band} ({debug_band_name})")
+        print(f"  median real flux: {real_med:.3e} uJy")
+        print(f"  median mock flux: {mock_med:.3e} uJy")
+        print(f"  mock/real ratio:  {ratio:.3f}")
 
     # ------------------------------------------------------------------
     # Optional mock reweighting/resampling to match the real observed prior

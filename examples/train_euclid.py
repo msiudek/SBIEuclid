@@ -69,6 +69,16 @@ def build_parser():
             "'2fwhm'/'3fwhm' use fixed-aperture fluxes. Default: templfit"
         ),
     )
+    p.add_argument(
+        "--sigma-sampler",
+        choices=["empirical", "truncnorm", "lognormal", "mag_lognormal", "mag_empirical_interp"],
+        default="mag_empirical_interp",
+        help=(
+            "Sigma sampler for observational noise. "
+            "'mag_empirical_interp' interpolates empirical sigma median/scatter vs magnitude; "
+            "other options keep legacy behavior. Default: mag_empirical_interp"
+        ),
+    )
     return p
 
 
@@ -261,9 +271,10 @@ sx.include_sigma = True
 sx.condition_sigma = True
 
 sx.configure_noise_model(
-    sigma_sampler="mag_lognormal",
+    sigma_sampler=args.sigma_sampler,
     detection_model="hard",
 )
+print(f"Noise sigma sampler: {sx.noise_sigma_sampler}")
 
 
 # --------------------------------------------------
