@@ -71,6 +71,9 @@ def parse_args():
                    help="Number of posterior samples per galaxy (default: 200)")
     p.add_argument("--outdir",      type=str,   default="sbi-logs/inference_cosmosweb",
                    help="Output directory for results and plots")
+    p.add_argument("--plot-subdir", type=str, default="diagnostics",
+                   choices=["diagnostics", "validation_plots", "none"],
+                   help="Subdirectory inside outdir for figures (default: diagnostics)")
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -125,6 +128,8 @@ def main():
     args = parse_args()
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    plot_dir = outdir if args.plot_subdir == "none" else (outdir / args.plot_subdir)
+    plot_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
     # ------------------------------------------------------------------
@@ -305,7 +310,7 @@ def main():
     ax2.set_ylim(-3, 3)
 
     plt.tight_layout()
-    plot_file = outdir / "mass_comparison.png"
+    plot_file = plot_dir / "mass_comparison.png"
     fig.savefig(plot_file, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Plot saved to {plot_file}")
@@ -322,7 +327,7 @@ def main():
     ax3.set_ylabel(r"SBI posterior half-width  68% CI [dex]", fontsize=12)
     ax3.set_title("Posterior uncertainty vs reference mass")
     fig2.tight_layout()
-    plot_file2 = outdir / "posterior_width.png"
+    plot_file2 = plot_dir / "posterior_width.png"
     fig2.savefig(plot_file2, dpi=150, bbox_inches="tight")
     plt.close(fig2)
     print(f"Plot saved to {plot_file2}")
@@ -338,7 +343,7 @@ def main():
     ax4.set_ylabel(r"SBI $\log \mathrm{SFR}\ [M_\odot\,\mathrm{yr}^{-1}]$", fontsize=12)
     ax4.set_title("Star-forming main sequence (SBI estimates)")
     fig3.tight_layout()
-    plot_file3 = outdir / "sfr_mass.png"
+    plot_file3 = plot_dir / "sfr_mass.png"
     fig3.savefig(plot_file3, dpi=150, bbox_inches="tight")
     plt.close(fig3)
     print(f"Plot saved to {plot_file3}")
