@@ -67,6 +67,8 @@ def parse_args():
                    help="Number of posterior samples per galaxy (default: 200)")
     p.add_argument("--outdir",      type=str,   default="sbi-logs/inference_cosmosweb",
                    help="Output directory for results and plots")
+    p.add_argument("--model-name",  type=str,   default=MODEL_NAME,
+                   help=f"Model filename in library/ (default: {MODEL_NAME})")
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -188,7 +190,7 @@ def main():
         lam_eff_file=f"lam_eff_{NOISE_PREFIX}.npy",
     )
     sx.model_path = str(LIB_DIR) + "/"
-    sx.model_name = MODEL_NAME
+    sx.model_name = args.model_name
     sx.infer_z    = False  # we want to condition on catalog redshift, not infer z
     sx.include_limit   = True
     sx.include_sigma   = True
