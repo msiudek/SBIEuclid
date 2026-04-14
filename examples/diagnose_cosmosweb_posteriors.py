@@ -34,14 +34,24 @@ ROOT = Path(__file__).resolve().parents[1]
 OBS_DIR = ROOT / "obs" / "obs_properties"
 LIB_DIR = ROOT / "library"
 CATALOG = ROOT / "obs" / "obs_properties" / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"
-APERTURE = "2fwhm"
-NOISE_PREFIX = f"north_{APERTURE}"
 
 FILTER_STEMS = [
     "h", "j", "y", "vis", "g_ext_hsc", "z_ext_hsc",
     "g_ext_decam", "r_ext_decam", "i_ext_decam", "z_ext_decam",
 ]
 N_FILT = len(FILTER_STEMS)
+
+
+def build_phot_col(stem, phot_type, err=False):
+    """Return flux/fluxerr column name for a filter stem and photometry type.
+
+    phot_type='templfit': flux_{stem}_templfit, except VIS → flux_vis_psf.
+    phot_type='2fwhm'/'3fwhm': flux_{stem}_{phot_type}_aper.
+    """
+    prefix = "fluxerr" if err else "flux"
+    if phot_type == "templfit":
+        return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
+    return f"{prefix}_{stem}_{phot_type}_aper"
 
 
 def parse_args():
@@ -55,6 +65,10 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--outdir", type=str, default="sbi-logs/diagnose_cosmosweb")
+    p.add_argument("--phot-type", type=str, default="templfit",
+                   choices=["templfit", "2fwhm", "3fwhm"],
+                   help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
+                         "'2fwhm', or '3fwhm' aperture. Default: templfit"))
     return p.parse_args()
 
 
@@ -102,12 +116,20 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
+    noise_prefix = f"north_{args.phot_type}"
+    print(f"Photometry type: {args.phot_type}  (noise prefix: {noise_prefix})")
 
     print(f"Loading catalog: {CATALOG}")
     cat = Table.read(CATALOG)
 
-    flux = np.column_stack([np.asarray(cat[f"flux_{s}_{APERTURE}_aper"], dtype=float) for s in FILTER_STEMS])
-    fluxerr = np.column_stack([np.asarray(cat[f"fluxerr_{s}_{APERTURE}_aper"], dtype=float) for s in FILTER_STEMS])
+    try:
+        flux    = np.column_stack([np.asarray(cat[build_phot_col(s, args.phot_type, err=False)], dtype=float) for s in FILTER_STEMS])
+        fluxerr = np.column_stack([np.asarray(cat[build_phot_col(s, args.phot_type, err=True)],  dtype=float) for s in FILTER_STEMS])
+    except KeyError as exc:
+        raise KeyError(
+            f"Column {exc} not found for phot_type='{args.phot_type}'. "
+            "For 'templfit' the matched catalog must include templfit/psf columns."
+        ) from exc
     z_ref = np.asarray(cat["zfinal"], dtype=float)
     m_ref = np.asarray(cat["mass_med"], dtype=float)
 
@@ -132,11 +154,11 @@ def main():
     sx.configure_filters(
         filter_list="filters_to_use.dat",
         filter_path=str(OBS_DIR),
-        mean_sigma_file=f"mean_sigma_{NOISE_PREFIX}.npy",
-        std_sigma_file=f"std_sigma_{NOISE_PREFIX}.npy",
-        percentiles_file=f"percentiles_{NOISE_PREFIX}.npy",
-        limits_file=f"background_noise_{NOISE_PREFIX}.npy",
-        lam_eff_file=f"lam_eff_{NOISE_PREFIX}.npy",
+        mean_sigma_file=f"mean_sigma_{noise_prefix}.npy",
+        std_sigma_file=f"std_sigma_{noise_prefix}.npy",
+        percentiles_file=f"percentiles_{noise_prefix}.npy",
+        limits_file=f"background_noise_{noise_prefix}.npy",
+        lam_eff_file=f"lam_eff_{noise_prefix}.npy",
     )
     sx.model_path = str(LIB_DIR) + "/"
     sx.model_name = args.model_name

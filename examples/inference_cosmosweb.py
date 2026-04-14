@@ -31,8 +31,6 @@ ROOT       = Path(__file__).resolve().parents[1]
 OBS_DIR    = ROOT / "obs" / "obs_properties"
 LIB_DIR    = ROOT / "library"
 CATALOG    = ROOT / "obs" / "obs_properties" / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"
-APERTURE   = "2fwhm"
-NOISE_PREFIX = f"north_{APERTURE}"
 MODEL_NAME   = "model_euclid_v1.3.pkl"
 ATLAS_NAME   = "atlas_obs_euclid_north_validate"
 
@@ -54,7 +52,17 @@ FILTER_NAMES = ["NISP-H", "NISP-J", "NISP-Y", "VIS",
 N_FILT = len(FILTER_STEMS)
 
 
-# ── argument parsing ───────────────────────────────────────────────────────
+# ── photometry column helper ───────────────────────────────────────────────
+def build_phot_col(stem, phot_type, err=False):
+    """Return flux/fluxerr column name for a filter stem and photometry type.
+
+    phot_type='templfit': flux_{stem}_templfit, except VIS → flux_vis_psf.
+    phot_type='2fwhm'/'3fwhm': flux_{stem}_{phot_type}_aper.
+    """
+    prefix = "fluxerr" if err else "flux"
+    if phot_type == "templfit":
+        return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
+    return f"{prefix}_{stem}_{phot_type}_aper"
 def parse_args():
     p = argparse.ArgumentParser(description="SBI mass inference on COSMOS-Web matched catalog")
     p.add_argument("--n-gal",       type=int,   default=500,
@@ -71,6 +79,10 @@ def parse_args():
                    help=f"Model filename in library/ (default: {MODEL_NAME})")
     p.add_argument("--sample-with", type=str, default="mcmc", choices=["rejection", "mcmc"],
                    help="Posterior sampling backend (default: mcmc)")
+    p.add_argument("--phot-type",   type=str, default="templfit",
+                   choices=["templfit", "2fwhm", "3fwhm"],
+                   help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
+                         "'2fwhm', or '3fwhm' aperture. Default: templfit"))
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -127,6 +139,8 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
+    noise_prefix = f"north_{args.phot_type}"
+    print(f"Photometry type: {args.phot_type}  (noise prefix: {noise_prefix})")
 
     # ------------------------------------------------------------------
     # 1. Load catalog and apply selection
@@ -137,8 +151,15 @@ def main():
     print(f"  {N_total} total matched galaxies")
 
     # Build flux and fluxerr arrays (n_gal, n_filt) in μJy
-    flux    = np.column_stack([np.array(cat[f"flux_{s}_{APERTURE}_aper"],    dtype=float) for s in FILTER_STEMS])
-    fluxerr = np.column_stack([np.array(cat[f"fluxerr_{s}_{APERTURE}_aper"], dtype=float) for s in FILTER_STEMS])
+    try:
+        flux    = np.column_stack([np.array(cat[build_phot_col(s, args.phot_type, err=False)], dtype=float) for s in FILTER_STEMS])
+        fluxerr = np.column_stack([np.array(cat[build_phot_col(s, args.phot_type, err=True)],  dtype=float) for s in FILTER_STEMS])
+    except KeyError as exc:
+        raise KeyError(
+            f"Column {exc} not found in catalog for phot_type='{args.phot_type}'. "
+            "For 'templfit' the matched catalog must include templfit/psf columns "
+            "(re-run the catalog matching script to add them)."
+        ) from exc
 
     # Reference values
     z_ref    = np.array(cat["zfinal"],   dtype=float)
@@ -185,11 +206,11 @@ def main():
     sx.configure_filters(
         filter_list="filters_to_use.dat",
         filter_path=str(OBS_DIR),
-        mean_sigma_file=f"mean_sigma_{NOISE_PREFIX}.npy",
-        std_sigma_file=f"std_sigma_{NOISE_PREFIX}.npy",
-        percentiles_file=f"percentiles_{NOISE_PREFIX}.npy",
-        limits_file=f"background_noise_{NOISE_PREFIX}.npy",
-        lam_eff_file=f"lam_eff_{NOISE_PREFIX}.npy",
+        mean_sigma_file=f"mean_sigma_{noise_prefix}.npy",
+        std_sigma_file=f"std_sigma_{noise_prefix}.npy",
+        percentiles_file=f"percentiles_{noise_prefix}.npy",
+        limits_file=f"background_noise_{noise_prefix}.npy",
+        lam_eff_file=f"lam_eff_{noise_prefix}.npy",
     )
     sx.model_path = str(LIB_DIR) + "/"
     sx.model_name = args.model_name

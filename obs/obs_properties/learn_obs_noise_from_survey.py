@@ -12,12 +12,36 @@ FITS_PATH = "COSMOS_DEEP.fits"
 FILTER_LIST_FILE = "filters_to_use.dat"
 FILTER_DIR = "."
 OUT_DIR = "."
-APERTURES = ["2fwhm", "3fwhm"]
+# Photometry types to process:
+#   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
+#   'templfit'       → template-fit (flux_{stem}_templfit; VIS uses flux_vis_psf)
+PHOT_TYPES = ["2fwhm", "3fwhm", "templfit"]
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
 PATCH_ID = 98
 SNR_THRESHOLD = 2.0
+
+def build_phot_col(stem, phot_type, err=False):
+    """Return the FITS column name for a given filter stem and photometry type.
+
+    Parameters
+    ----------
+    stem : str
+        Filter col_stem as listed in filters_to_use.dat (e.g. 'h', 'vis', 'g_ext_hsc').
+    phot_type : str
+        One of '2fwhm', '3fwhm', or 'templfit'.
+    err : bool
+        If True return the error column, else the flux column.
+    """
+    prefix = "fluxerr" if err else "flux"
+    if phot_type == "templfit":
+        if stem == "vis":
+            return f"{prefix}_vis_psf"
+        return f"{prefix}_{stem}_templfit"
+    # aperture photometry
+    return f"{prefix}_{stem}_{phot_type}_aper"
+
 
 def load_filter_metadata(filter_list_file, filt_dir):
     """Load filter metadata from .dat file. Returns list of dicts with keys:"""
@@ -57,15 +81,14 @@ def compute_lambda_eff(entries):
     return np.array(lam_eff)
 
 
-def load_from_fits(fits_path, entries, aperture, patch_id=98):
-    """Load photometry and errors from COSMOS-Deep FITS for one aperture."""
+def load_from_fits(fits_path, entries, phot_type, patch_id=98):
+    """Load photometry and errors from COSMOS-Deep FITS for one photometry type."""
     cat = Table.read(fits_path)
     print(f"Total rows: {len(cat)}")
-    
-    # Filter by patch_id (convert to int first for comparison)
+
+    # Filter by patch_id
     patch_col = cat["patch_id_list"]
     patch_int = int(patch_id) if not isinstance(patch_id, (int, np.integer)) else patch_id
-    # Build mask by direct iteration to avoid numpy scalar conversion warnings
     mask_list = []
     for val in patch_col:
         try:
@@ -81,10 +104,12 @@ def load_from_fits(fits_path, entries, aperture, patch_id=98):
     err_list = []
 
     for entry in entries:
-        col_stem = entry["col_stem"]
-
-        fcol = f"flux_{col_stem}_{aperture}_aper"
-        ecol = f"fluxerr_{col_stem}_{aperture}_aper"
+        stem = entry["col_stem"]
+        fcol = build_phot_col(stem, phot_type, err=False)
+        ecol = build_phot_col(stem, phot_type, err=True)
+        if fcol not in cat.colnames:
+            raise KeyError(f"Column '{fcol}' not found in {fits_path}. "
+                           f"Available flux cols sample: {[c for c in cat.colnames if 'flux' in c][:8]}")
         phot_list.append(np.array(cat[fcol], dtype=float))
         err_list.append(np.array(cat[ecol], dtype=float))
 
@@ -201,11 +226,11 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"\n3. Output directory: {os.path.abspath(OUT_DIR)}")
 
-    # Process each aperture independently and write separate files
-    for aperture in APERTURES:
-        prefix = f"{HEMISPHERE}_{aperture}"
-        print(f"\n4. Processing aperture: {aperture}")
-        phot, err = load_from_fits(FITS_PATH, entries, aperture, PATCH_ID)
+    # Process each photometry type independently and write separate files
+    for phot_type in PHOT_TYPES:
+        prefix = f"{HEMISPHERE}_{phot_type}"
+        print(f"\n4. Processing phot_type: {phot_type}")
+        phot, err = load_from_fits(FITS_PATH, entries, phot_type, PATCH_ID)
 
         percentiles, mean_sigma, std_sigma, sigma_samples = compute_noise_features(
             phot, err, PERCENTILE_CUTS, SNR_THRESHOLD

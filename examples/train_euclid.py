@@ -59,6 +59,16 @@ def build_parser():
         default=None,
         help="Output model filename (default auto-selected from params and z-mode)",
     )
+    p.add_argument(
+        "--phot-type",
+        choices=["2fwhm", "3fwhm", "templfit"],
+        default="templfit",
+        help=(
+            "Photometry type used for noise model and mock matching. "
+            "'templfit' uses template-fit fluxes (flux_{stem}_templfit; VIS: flux_vis_psf). "
+            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. Default: templfit"
+        ),
+    )
     return p
 
 
@@ -91,7 +101,15 @@ LIB_DIR = PROJECT_ROOT / "library"
 
 ATLAS_NAME  = "atlas_obs_euclid_north_validate"
 
-NOISE_PREFIX = "north_2fwhm"
+# Photometry column helper (mirrors learn_obs_noise_from_survey.py)
+def build_phot_col(stem, phot_type, err=False):
+    """Return flux/fluxerr column name for a filter stem and photometry type."""
+    prefix = "fluxerr" if err else "flux"
+    if phot_type == "templfit":
+        return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
+    return f"{prefix}_{stem}_{phot_type}_aper"
+
+NOISE_PREFIX = f"north_{args.phot_type}"
 NONDET_MAG = 99.0
 SNR_DETECTION_THRESHOLD = 2.0
 MAG_BRIGHT = 16.0
@@ -103,7 +121,7 @@ FILTER_SHORT = [m["short"] for m in _FILTER_META]
 FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
 
 
-def load_real_mag_for_mock_match(aperture):
+def load_real_mag_for_mock_match(phot_type):
     """Load real detected magnitudes (filter-major arrays) for prior matching."""
     from astropy.table import Table
 
@@ -123,9 +141,10 @@ def load_real_mag_for_mock_match(aperture):
     real_mag = np.full((n_filt, n_gal), np.nan)
 
     for fi, stem in enumerate(FILTER_COL_STEMS):
-        fcol = f"flux_{stem}_{aperture}_aper"
-        ecol = f"fluxerr_{stem}_{aperture}_aper"
+        fcol = build_phot_col(stem, phot_type, err=False)
+        ecol = build_phot_col(stem, phot_type, err=True)
         if fcol not in cat.colnames:
+            print(f"  WARNING: column '{fcol}' not found in COSMOS_DEEP.fits — skipping filter {stem}")
             continue
 
         flux = np.asarray(cat[fcol], dtype=float)
@@ -280,8 +299,7 @@ print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logS
 
 if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
-    aperture = NOISE_PREFIX.split("_", 1)[1] if "_" in NOISE_PREFIX else "2fwhm"
-    real_mag = load_real_mag_for_mock_match(aperture=aperture)
+    real_mag = load_real_mag_for_mock_match(phot_type=args.phot_type)
     mock_mag = sx.mag[:, :, 0].T
 
     mock_weights, match_msg = compute_mock_match_weights(real_mag, mock_mag)
