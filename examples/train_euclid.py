@@ -43,6 +43,22 @@ def build_parser():
         default="vis_yj2d",
         help="Resample mocks to match real observed VIS×(Y-J) prior (default: vis_yj2d)",
     )
+    p.add_argument(
+        "--z-mode",
+        choices=["condition", "infer"],
+        default="condition",
+        help=(
+            "How redshift is handled. "
+            "condition: use z as known conditioning input (recommended for catalog-z inference); "
+            "infer: infer z from photometry."
+        ),
+    )
+    p.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Output model filename (default auto-selected from params and z-mode)",
+    )
     return p
 
 
@@ -74,7 +90,6 @@ OBS_DIR = PROJECT_ROOT / "obs" / "obs_properties"
 LIB_DIR = PROJECT_ROOT / "library"
 
 ATLAS_NAME  = "atlas_obs_euclid_north_validate"
-MODEL_NAME  = "model_euclid_v1.3.pkl"
 
 NOISE_PREFIX = "north_2fwhm"
 NONDET_MAG = 99.0
@@ -205,7 +220,17 @@ sx.atlas_path = str(LIB_DIR) + "/"
 sx.model_path = str(LIB_DIR) + "/"
 
 sx.atlas_name = ATLAS_NAME
-sx.model_name = MODEL_NAME
+if args.model_name is not None:
+    sx.model_name = args.model_name
+else:
+    if args.params == "mass_sfr" and args.z_mode == "condition":
+        sx.model_name = "model_euclid_v1.5_mass_sfr_zcond.pkl"
+    elif args.params == "mass_sfr" and args.z_mode == "infer":
+        sx.model_name = "model_euclid_v1.5_mass_sfr_zinfer.pkl"
+    elif args.params == "all" and args.z_mode == "condition":
+        sx.model_name = "model_euclid_v1.5_all_zcond.pkl"
+    else:
+        sx.model_name = "model_euclid_v1.5_all_zinfer.pkl"
 sx.n_simulation = N_SIM
 
 sx.parametric = True
@@ -279,23 +304,33 @@ else:
 # --------------------------------------------------
 # SELECT TARGETS
 # --------------------------------------------------
-print(f"[3/5] Selecting parameters ({args.params})...")
+print(f"[3/5] Selecting parameters ({args.params}, z-mode={args.z_mode})...")
 
 # theta column order is fixed: 0=logM*, 1=logM*_formed, 2=logSFR,
 #                               3=tau, 4=t_i, 5=[M/H], 6=Av, 7=z
 if args.params == "mass_sfr":
-    PARAM_IDXS = [0, 2]
+    if args.z_mode == "condition":
+        PARAM_IDXS = [0, 2, 7]
+    else:
+        PARAM_IDXS = [0, 2]
     PARAM_NAMES = ["logM", "logSFR"]
     sx.theta = sx.theta[:, PARAM_IDXS]
     sx.labels = PARAM_NAMES
-    # Important: with infer_z=False, sbipix.train() treats the last theta
-    # column as known redshift and removes it from inferred targets.
-    # For mass_sfr we want all selected parameters inferred, so enable infer_z mode.
-    sx.infer_z = True
+    # infer_z=False: treat last theta column as known redshift conditioning input.
+    # infer_z=True: infer all selected parameters directly from photometry.
+    sx.infer_z = args.z_mode == "infer"
     print(f"    Using columns: {PARAM_IDXS} -> {PARAM_NAMES}")
-    print("    infer_z=True for mass_sfr mode (infer all selected parameters)")
+    if sx.infer_z:
+        print("    Redshift handling: infer z from photometry (no catalog-z conditioning)")
+    else:
+        print("    Redshift handling: condition on known z (last theta column)")
 else:
+    sx.infer_z = args.z_mode == "infer"
     print(f"    Using all parameters: {sx.theta.shape[1]} dimensions")
+    if sx.infer_z:
+        print("    Redshift handling: infer z as part of target vector")
+    else:
+        print("    Redshift handling: condition on known z (theta[:, -1])")
 
 sx.n_simulation = len(sx.theta)
 
@@ -306,6 +341,7 @@ min_thetas = np.min(sx.theta, axis=0)
 print("Parameter bounds:")
 for i, name in enumerate(sx.labels):
     print(f"   - {name}: [{min_thetas[i]:.2f}, {max_thetas[i]:.2f}]")
+print(f"Model output file: {sx.model_path}{sx.model_name}")
 
 # --------------------------------------------------
 # TRAIN
