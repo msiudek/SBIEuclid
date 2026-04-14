@@ -443,3 +443,152 @@ def plot_intrinsic_color_vs_parameters(mock_data, model, outdir, filter_short):
 		saved.append(out)
 
 	return saved
+
+
+def plot_mass_comparison(mass_ref, mass_pred, z_vals, outdir, title_prefix="SBI vs COSMOS-Web stellar mass"):
+	"""Scatter comparison between reference and inferred stellar mass."""
+	_style()
+	mass_ref = np.asarray(mass_ref, dtype=float)
+	mass_pred = np.asarray(mass_pred, dtype=float)
+	z_vals = np.asarray(z_vals, dtype=float)
+	valid = np.isfinite(mass_ref) & np.isfinite(mass_pred) & np.isfinite(z_vals)
+	if valid.sum() == 0:
+		return None
+
+	delta = mass_pred[valid] - mass_ref[valid]
+	bias = np.median(delta)
+	nmad = 1.4826 * np.median(np.abs(delta - bias))
+
+	fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+
+	ax = axes[0]
+	sc = ax.scatter(
+		mass_ref[valid],
+		mass_pred[valid],
+		c=z_vals[valid],
+		cmap="plasma_r",
+		vmin=0,
+		vmax=4,
+		s=12,
+		alpha=0.6,
+		linewidths=0,
+		rasterized=True,
+	)
+	m_range = np.array([mass_ref[valid].min() - 0.3, mass_ref[valid].max() + 0.3])
+	ax.plot(m_range, m_range, "k--", lw=1, label="1:1")
+	ax.plot(m_range, m_range + bias, "r-", lw=1, label=f"bias = {bias:+.2f} dex")
+	cb = fig.colorbar(sc, ax=ax)
+	cb.set_label("photometric redshift z")
+	ax.set_xlabel("COSMOS-Web log M* (reference)")
+	ax.set_ylabel("SBI log M*")
+	ax.set_title(f"{title_prefix}\nN={valid.sum()}, NMAD={nmad:.3f} dex")
+	ax.legend(fontsize=9)
+	ax.set_aspect("equal", "box")
+
+	ax2 = axes[1]
+	sc2 = ax2.scatter(
+		z_vals[valid],
+		delta,
+		c=mass_ref[valid],
+		cmap="viridis",
+		vmin=7,
+		vmax=12,
+		s=12,
+		alpha=0.6,
+		linewidths=0,
+		rasterized=True,
+	)
+	ax2.axhline(0, color="k", lw=1, ls="--")
+	ax2.axhline(bias, color="r", lw=1, label=f"median = {bias:+.2f} dex")
+	z_bins = np.linspace(z_vals[valid].min(), z_vals[valid].max(), 12)
+	z_mid = 0.5 * (z_bins[:-1] + z_bins[1:])
+	dmed = [
+		np.median(delta[(z_vals[valid] >= z_bins[k]) & (z_vals[valid] < z_bins[k + 1])])
+		for k in range(len(z_mid))
+	]
+	ax2.plot(z_mid, dmed, "r-o", ms=4, lw=1.5, label="running median")
+	cb2 = fig.colorbar(sc2, ax=ax2)
+	cb2.set_label("COSMOS-Web log M*")
+	ax2.set_xlabel("photometric redshift z")
+	ax2.set_ylabel("Δ log M* (SBI − COSMOS-Web) [dex]")
+	ax2.set_title("Mass residual vs redshift")
+	ax2.legend(fontsize=9)
+	ax2.set_ylim(-3, 3)
+
+	fig.tight_layout()
+	out = Path(outdir) / "mass_comparison.png"
+	fig.savefig(out, dpi=150, bbox_inches="tight")
+	plt.close(fig)
+	return out
+
+
+def plot_posterior_width_vs_mass(mass_ref, mass_lo, mass_hi, z_vals, outdir):
+	"""Plot half-width of 68% posterior interval as a function of reference mass."""
+	_style()
+	mass_ref = np.asarray(mass_ref, dtype=float)
+	mass_lo = np.asarray(mass_lo, dtype=float)
+	mass_hi = np.asarray(mass_hi, dtype=float)
+	z_vals = np.asarray(z_vals, dtype=float)
+	width = 0.5 * (mass_hi - mass_lo)
+	valid = np.isfinite(mass_ref) & np.isfinite(width) & np.isfinite(z_vals)
+	if valid.sum() == 0:
+		return None
+
+	fig, ax = plt.subplots(figsize=(7, 5))
+	sc = ax.scatter(
+		mass_ref[valid],
+		width[valid],
+		c=z_vals[valid],
+		cmap="plasma_r",
+		vmin=0,
+		vmax=4,
+		s=12,
+		alpha=0.6,
+		linewidths=0,
+		rasterized=True,
+	)
+	cb = fig.colorbar(sc, ax=ax)
+	cb.set_label("photometric redshift z")
+	ax.set_xlabel("COSMOS-Web log M* (reference)")
+	ax.set_ylabel("SBI posterior half-width 68% CI [dex]")
+	ax.set_title("Posterior uncertainty vs reference mass")
+	fig.tight_layout()
+	out = Path(outdir) / "posterior_width.png"
+	fig.savefig(out, dpi=150, bbox_inches="tight")
+	plt.close(fig)
+	return out
+
+
+def plot_sfr_mass(logm_pred, logsfr_pred, z_vals, outdir):
+	"""Plot SBI-inferred SFR-mass relation."""
+	_style()
+	logm_pred = np.asarray(logm_pred, dtype=float)
+	logsfr_pred = np.asarray(logsfr_pred, dtype=float)
+	z_vals = np.asarray(z_vals, dtype=float)
+	valid = np.isfinite(logm_pred) & np.isfinite(logsfr_pred) & np.isfinite(z_vals)
+	if valid.sum() == 0:
+		return None
+
+	fig, ax = plt.subplots(figsize=(7, 5))
+	sc = ax.scatter(
+		logm_pred[valid],
+		logsfr_pred[valid],
+		c=z_vals[valid],
+		cmap="plasma_r",
+		vmin=0,
+		vmax=4,
+		s=12,
+		alpha=0.6,
+		linewidths=0,
+		rasterized=True,
+	)
+	cb = fig.colorbar(sc, ax=ax)
+	cb.set_label("photometric redshift z")
+	ax.set_xlabel("SBI log M*")
+	ax.set_ylabel("SBI log SFR [Msun/yr]")
+	ax.set_title("Star-forming main sequence (SBI estimates)")
+	fig.tight_layout()
+	out = Path(outdir) / "sfr_mass.png"
+	fig.savefig(out, dpi=150, bbox_inches="tight")
+	plt.close(fig)
+	return out

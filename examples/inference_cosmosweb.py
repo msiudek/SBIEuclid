@@ -19,14 +19,10 @@ Selection criteria applied before inference:
 
 import argparse
 import pickle
-import os
 from pathlib import Path
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+import torch
 from astropy.table import Table
 from scipy.stats import pearsonr
 
@@ -71,9 +67,6 @@ def parse_args():
                    help="Number of posterior samples per galaxy (default: 200)")
     p.add_argument("--outdir",      type=str,   default="sbi-logs/inference_cosmosweb",
                    help="Output directory for results and plots")
-    p.add_argument("--plot-subdir", type=str, default="diagnostics",
-                   choices=["diagnostics", "validation_plots", "none"],
-                   help="Subdirectory inside outdir for figures (default: diagnostics)")
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -124,12 +117,11 @@ def build_obs_array(flux_2d, fluxerr_2d, limits):
 # ── main ──────────────────────────────────────────────────────────────────
 def main():
     from sbipix import sbipix
+    from sbipix.utils import validation_plots as vplots
 
     args = parse_args()
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    plot_dir = outdir if args.plot_subdir == "none" else (outdir / args.plot_subdir)
-    plot_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
     # ------------------------------------------------------------------
@@ -197,7 +189,7 @@ def main():
     )
     sx.model_path = str(LIB_DIR) + "/"
     sx.model_name = MODEL_NAME
-    sx.infer_z    = True   # mass_sfr mode: logM + logSFR both inferred
+    sx.infer_z    = False  # we want to condition on catalog redshift, not infer z
     sx.include_limit   = True
     sx.include_sigma   = True
     sx.condition_sigma = True
@@ -224,8 +216,25 @@ def main():
     with open(sx.model_path + sx.model_name, "rb") as f:
         qphi = pickle.load(f)
 
+    # Ensure selected posterior model supports conditioning on catalog redshift
+    try:
+        qphi.sample((1,), x=torch.zeros((1, obs.shape[1] + 1), dtype=torch.float32), show_progress_bars=False)
+    except Exception as exc:
+        raise RuntimeError(
+            "Selected model is incompatible with catalog-redshift conditioning (obs+z input). "
+            "This model expects photometry-only context. Please use/retrain a model trained with infer_z=False. "
+            f"Model: {sx.model_name}; expected context in this script: {obs.shape[1] + 1}."
+        ) from exc
+
     print(f"Running inference on {len(sel)} galaxies × {args.n_samples} samples ...")
-    posteriors = sx._get_posterior_obs(obs, qphi, n_samples=args.n_samples, bar=True, device=args.device)
+    posteriors = sx._get_posterior_obs(
+        obs,
+        qphi,
+        n_samples=args.n_samples,
+        bar=True,
+        input_z=z_sel,
+        device=args.device,
+    )
 
     # ------------------------------------------------------------------
     # 5. Extract summary statistics
@@ -265,88 +274,19 @@ def main():
     print(f"  COSMOS-Web logM range: [{mass_sel[valid].min():.2f}, {mass_sel[valid].max():.2f}]")
 
     # ------------------------------------------------------------------
-    # 8. Plots
+    # 8. Plots (shared validation plotting utilities)
     # ------------------------------------------------------------------
-    # -- 8a. Mass-mass comparison
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+    plot_file = vplots.plot_mass_comparison(mass_sel[valid], logM_med[valid], z_sel[valid], outdir)
+    if plot_file is not None:
+        print(f"Plot saved to {plot_file}")
 
-    ax = axes[0]
-    sc = ax.scatter(mass_sel[valid], logM_med[valid],
-                    c=z_sel[valid], cmap="plasma_r", vmin=0, vmax=4,
-                    s=12, alpha=0.6, linewidths=0, rasterized=True)
-    m_range = np.array([mass_sel[valid].min() - 0.3, mass_sel[valid].max() + 0.3])
-    ax.plot(m_range, m_range, "k--", lw=1, label="1:1")
-    ax.plot(m_range, m_range + np.median(delta), "r-", lw=1,
-            label=f"bias = {np.median(delta):+.2f} dex")
-    cb = fig.colorbar(sc, ax=ax)
-    cb.set_label("photometric redshift $z$")
-    ax.set_xlabel(r"COSMOS-Web $\log M_\star/M_\odot$ (reference)", fontsize=12)
-    ax.set_ylabel(r"SBI $\log M_\star/M_\odot$", fontsize=12)
-    ax.set_title(f"SBI vs COSMOS-Web stellar mass\n"
-                 f"N={valid.sum()}, r={r:.3f}, NMAD={1.4826*np.median(np.abs(delta-np.median(delta))):.3f} dex")
-    ax.legend(fontsize=9)
-    ax.set_aspect("equal", "box")
+    plot_file2 = vplots.plot_posterior_width_vs_mass(mass_sel[valid], logM_lo[valid], logM_hi[valid], z_sel[valid], outdir)
+    if plot_file2 is not None:
+        print(f"Plot saved to {plot_file2}")
 
-    # -- 8b. Residual vs redshift
-    ax2 = axes[1]
-    sc2 = ax2.scatter(z_sel[valid], delta,
-                      c=mass_sel[valid], cmap="viridis", vmin=7, vmax=12,
-                      s=12, alpha=0.6, linewidths=0, rasterized=True)
-    ax2.axhline(0, color="k", lw=1, ls="--")
-    ax2.axhline(np.median(delta), color="r", lw=1,
-                label=f"median = {np.median(delta):+.2f} dex")
-    # running median
-    z_bins = np.linspace(z_sel[valid].min(), z_sel[valid].max(), 12)
-    z_mid = 0.5 * (z_bins[:-1] + z_bins[1:])
-    dmed  = [np.median(delta[(z_sel[valid] >= z_bins[k]) & (z_sel[valid] < z_bins[k+1])])
-             for k in range(len(z_mid))]
-    ax2.plot(z_mid, dmed, "r-o", ms=4, lw=1.5, label="running median")
-    cb2 = fig.colorbar(sc2, ax=ax2)
-    cb2.set_label(r"COSMOS-Web $\log M_\star$")
-    ax2.set_xlabel("photometric redshift $z$", fontsize=12)
-    ax2.set_ylabel(r"$\Delta\log M_\star$ (SBI − COSMOS-Web) [dex]", fontsize=12)
-    ax2.set_title("Mass residual vs redshift")
-    ax2.legend(fontsize=9)
-    ax2.set_ylim(-3, 3)
-
-    plt.tight_layout()
-    plot_file = plot_dir / "mass_comparison.png"
-    fig.savefig(plot_file, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Plot saved to {plot_file}")
-
-    # -- 8c. Posterior width vs reference mass
-    logM_err = 0.5 * (logM_hi - logM_lo)
-    fig2, ax3 = plt.subplots(figsize=(7, 5))
-    sc3 = ax3.scatter(mass_sel[valid], logM_err[valid],
-                      c=z_sel[valid], cmap="plasma_r", vmin=0, vmax=4,
-                      s=12, alpha=0.6, linewidths=0, rasterized=True)
-    cb3 = fig2.colorbar(sc3, ax=ax3)
-    cb3.set_label("photometric redshift $z$")
-    ax3.set_xlabel(r"COSMOS-Web $\log M_\star$ (reference)", fontsize=12)
-    ax3.set_ylabel(r"SBI posterior half-width  68% CI [dex]", fontsize=12)
-    ax3.set_title("Posterior uncertainty vs reference mass")
-    fig2.tight_layout()
-    plot_file2 = plot_dir / "posterior_width.png"
-    fig2.savefig(plot_file2, dpi=150, bbox_inches="tight")
-    plt.close(fig2)
-    print(f"Plot saved to {plot_file2}")
-
-    # -- 8d. SFR-Mass (star-forming main sequence)
-    fig3, ax4 = plt.subplots(figsize=(7, 5))
-    sc4 = ax4.scatter(logM_med[valid], logSFR_med[valid],
-                      c=z_sel[valid], cmap="plasma_r", vmin=0, vmax=4,
-                      s=12, alpha=0.6, linewidths=0, rasterized=True)
-    cb4 = fig3.colorbar(sc4, ax=ax4)
-    cb4.set_label("photometric redshift $z$")
-    ax4.set_xlabel(r"SBI $\log M_\star/M_\odot$", fontsize=12)
-    ax4.set_ylabel(r"SBI $\log \mathrm{SFR}\ [M_\odot\,\mathrm{yr}^{-1}]$", fontsize=12)
-    ax4.set_title("Star-forming main sequence (SBI estimates)")
-    fig3.tight_layout()
-    plot_file3 = plot_dir / "sfr_mass.png"
-    fig3.savefig(plot_file3, dpi=150, bbox_inches="tight")
-    plt.close(fig3)
-    print(f"Plot saved to {plot_file3}")
+    plot_file3 = vplots.plot_sfr_mass(logM_med[valid], logSFR_med[valid], z_sel[valid], outdir)
+    if plot_file3 is not None:
+        print(f"Plot saved to {plot_file3}")
 
     print("\nDone.")
 
