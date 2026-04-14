@@ -69,6 +69,8 @@ def parse_args():
                    help="Output directory for results and plots")
     p.add_argument("--model-name",  type=str,   default=MODEL_NAME,
                    help=f"Model filename in library/ (default: {MODEL_NAME})")
+    p.add_argument("--sample-with", type=str, default="mcmc", choices=["rejection", "mcmc"],
+                   help="Posterior sampling backend (default: mcmc)")
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -214,9 +216,23 @@ def main():
     # ------------------------------------------------------------------
     # 4. Load model and run inference
     # ------------------------------------------------------------------
-    print(f"\nLoading model: {sx.model_path + sx.model_name}")
-    with open(sx.model_path + sx.model_name, "rb") as f:
+    model_file = sx.model_path + sx.model_name
+    print(f"\nLoading model: {model_file}")
+    with open(model_file, "rb") as f:
         qphi = pickle.load(f)
+
+    if args.sample_with != "rejection":
+        anpe_file = sx.model_path + "anpe_" + sx.model_name
+        try:
+            with open(anpe_file, "rb") as f:
+                anpe = pickle.load(f)
+            qphi = anpe.build_posterior(sample_with=args.sample_with)
+            print(f"Using posterior sampler backend: {args.sample_with}")
+        except Exception as exc:
+            print(
+                f"WARNING: could not rebuild posterior with sample_with='{args.sample_with}' "
+                f"from {anpe_file} ({exc}). Falling back to default sampler."
+            )
 
     # Ensure selected posterior model supports conditioning on catalog redshift
     try:
@@ -228,7 +244,7 @@ def main():
             f"Model: {sx.model_name}; expected context in this script: {obs.shape[1] + 1}."
         ) from exc
 
-    print(f"Running inference on {len(sel)} galaxies × {args.n_samples} samples ...")
+    print(f"Running inference on {len(sel)} galaxies × {args.n_samples} samples (backend={args.sample_with}) ...")
     posteriors = sx._get_posterior_obs(
         obs,
         qphi,
