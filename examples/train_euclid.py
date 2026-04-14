@@ -273,6 +273,7 @@ sx.condition_sigma = True
 sx.configure_noise_model(
     sigma_sampler=args.sigma_sampler,
     detection_model="hard",
+    snr_threshold=SNR_DETECTION_THRESHOLD,
 )
 print(f"Noise sigma sampler: {sx.noise_sigma_sampler}")
 

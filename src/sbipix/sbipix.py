@@ -166,6 +166,7 @@ class sbipix():
         self.condition_sigma = False
         self.noise_sigma_sampler = 'empirical'
         self.noise_detection_model = 'hard'
+        self.noise_snr_threshold = 2.0
         self.noise_sigma_mag_params = None
         self.noise_sigma_mag_ranges = None
         self.noise_sigma_mag_min = 1e-6
@@ -284,12 +285,15 @@ class sbipix():
 
     def configure_noise_model(self,
                               sigma_sampler=None,
-                              detection_model=None):
+                              detection_model=None,
+                              snr_threshold=None):
         """Configure how observational uncertainties are sampled."""
         if sigma_sampler is not None:
             self.noise_sigma_sampler = str(sigma_sampler)
         if detection_model is not None:
             self.noise_detection_model = str(detection_model)
+        if snr_threshold is not None:
+            self.noise_snr_threshold = float(snr_threshold)
 
     def _compute_bin_centers(self, filter_idx):
         """Return magnitude-bin centers from percentile boundaries."""
@@ -539,7 +543,12 @@ class sbipix():
         std_i = np.interp(mags_clip, x, y_std)
         std_i = np.clip(std_i, 1e-4, None)
 
-        sampled = np.random.normal(loc=med_i, scale=std_i)
+        med_i = np.clip(med_i, 1e-6, None)
+        ratio = np.clip(std_i / med_i, 1e-6, None)
+        sampled = np.random.lognormal(
+            mean=np.log(med_i) - 0.5 * ratio**2,
+            sigma=ratio,
+        )
         sampled = np.clip(sampled, self.noise_sigma_mag_min, self.noise_sigma_mag_max)
         return sampled
 
@@ -556,7 +565,7 @@ class sbipix():
 
         if self.noise_detection_model == 'probabilistic':
             snr_obs = flux_obs[finite] / np.maximum(sigma_flux[finite], 1e-12)
-            snr_threshold = 1.0
+            snr_threshold = float(self.noise_snr_threshold)
             snr_width = 1.0
             delta_snr = snr_obs - snr_threshold
             p_detect = 0.5 * (1.0 + np.tanh(delta_snr / snr_width))
@@ -1065,14 +1074,14 @@ class sbipix():
         # use local linearization around TRUE flux
         sigma_flux = (np.log(10) / 2.5) * flux_true * np.abs(sigma_mag)
 
-        # enforce minimum background noise
-        sigma_flux = np.maximum(sigma_flux, sigma_lim)
+        # combine sampled noise and background noise floor in quadrature
+        sigma_flux = np.sqrt(np.maximum(sigma_flux, 0.0)**2 + np.maximum(sigma_lim, 0.0)**2)
 
         # --- ADD NOISE IN FLUX SPACE (CRITICAL FIX) ---
         flux_obs = flux_true + np.random.normal(0, sigma_flux)
 
         # --- detection using SNR (CRITICAL FIX) ---
-        snr_threshold = getattr(self, 'snr_threshold', 1.0)
+        snr_threshold = float(self.noise_snr_threshold)
         snr = flux_obs / np.maximum(sigma_flux, 1e-12)
         detected = snr >= snr_threshold
 

@@ -600,6 +600,7 @@ def build_validation_model(args, obs_dir, library_dir):
     model.configure_noise_model(
         sigma_sampler=args.sigma_sampler,
         detection_model=args.detection_model,
+        snr_threshold=SNR_DETECTION_THRESHOLD,
     )
     return model, noise_prefix, limits_file
 
@@ -754,6 +755,12 @@ def main():
     library_dir = project_root / "library"
     library_dir.mkdir(parents=True, exist_ok=True)
     outdir = project_root / args.outdir
+    if outdir.exists() and not outdir.is_dir():
+        raise RuntimeError(
+            f"Requested --outdir points to an existing file: {outdir}. "
+            "Use a directory path for --outdir and a different filename for tee output "
+            "(for example: --outdir sbi-logs/validate_v21 and tee sbi-logs/validate_v21.log)."
+        )
     outdir.mkdir(parents=True, exist_ok=True)
 
     fits_path = CATALOG_FILE
