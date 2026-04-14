@@ -802,8 +802,9 @@ class sbipix():
             self.mag[:, i, 0] = mag_n_noise
             self.mag[:, i, 1] = mag_err
 
-    def _add_noise_nan_limit(self, mag_array, filter_idx):
+    def _add_noise_nan_limit_mag_space(self, mag_array, filter_idx):
         """
+        LEGACY: noise added in magnitude space (kept for reference).
         Vectorized noise addition and detection limits for an array of magnitudes.
 
         Parameters
@@ -896,9 +897,80 @@ class sbipix():
 
             final_errs[det_idx] = mag_errs_det[detected_after_noise]
 
-        return final_mags, final_errs    
+        return final_mags, final_errs
 
-    
+    def _add_noise_nan_limit(self, mag_array, filter_idx):
+        """
+        CORRECT noise model:
+        - noise in flux space
+        - SNR-based detection
+        """
+
+        # --- convert to flux ---
+        flux_true = mag_conversion(mag_array, convert_to='flux')
+
+        # --- detection limit (1σ) ---
+        sigma_lim = self.limits[filter_idx]
+
+        # --- sample sigma in FLUX space ---
+        # mean_sigma_obs shape: (n_filters, n_bins); clip to n_bins - 1
+        n_bins = self.mean_sigma_obs.shape[1]
+        mags = mag_array
+
+        bin_indices = np.digitize(mags, self.percentiles[:, filter_idx]) - 1
+        bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+        # sample σ_mag from empirical or parametric distribution
+        use_empirical_sigma = (
+            self.noise_sigma_sampler == 'empirical' and self.sigma_samples_obs is not None
+        )
+        if use_empirical_sigma:
+            sigma_mag = np.zeros_like(mags)
+            for i in range(len(mags)):
+                samples = self.sigma_samples_obs[filter_idx, bin_indices[i]]
+                vals = np.asarray(samples, dtype=float).ravel()
+                if len(vals) > 0:
+                    sigma_mag[i] = np.random.choice(vals)
+                else:
+                    sigma_mag[i] = self.mean_sigma_obs[filter_idx, bin_indices[i]]
+        else:
+            mean = self.mean_sigma_obs[filter_idx, bin_indices]
+            std  = self.stds_sigma_obs[filter_idx, bin_indices]
+            sigma_mag = np.random.normal(mean, std)
+
+        # --- convert σ_mag → σ_flux properly ---
+        # use local linearization around TRUE flux
+        sigma_flux = (np.log(10) / 2.5) * flux_true * np.abs(sigma_mag)
+
+        # enforce minimum background noise
+        sigma_flux = np.maximum(sigma_flux, sigma_lim)
+
+        # --- ADD NOISE IN FLUX SPACE (CRITICAL FIX) ---
+        flux_obs = flux_true + np.random.normal(0, sigma_flux)
+
+        # --- detection using SNR (CRITICAL FIX) ---
+        snr_threshold = getattr(self, 'snr_threshold', 1.0)
+        snr = flux_obs / np.maximum(sigma_flux, 1e-12)
+        detected = snr >= snr_threshold
+
+        # --- convert to mag ---
+        mag_obs = mag_conversion(flux_obs, convert_to='mag')
+
+        # --- outputs ---
+        final_mag = np.full_like(mag_array, 99.0)
+        final_err = np.full_like(mag_array, mag_conversion(sigma_lim, convert_to='mag'))
+
+        det_idx = detected & np.isfinite(mag_obs)
+
+        final_mag[det_idx] = mag_obs[det_idx]
+
+        # convert σ_flux → σ_mag for storage
+        final_err[det_idx] = (2.5 / np.log(10)) * sigma_flux[det_idx] / np.maximum(
+            np.abs(flux_obs[det_idx]), 1e-12
+        )
+
+        return final_mag, final_err
+
 
     def train(self, min_thetas=[6, -10, 0, 0, 0, -2.3, 0, 0], 
               max_thetas=[12, 3, 1, 1, 1, 0.4, 3, 10], 
