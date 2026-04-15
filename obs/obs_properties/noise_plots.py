@@ -1,9 +1,11 @@
 """Generate comparison plots for noise products.
 
-Simple version: compares 2fwhm vs 3fwhm products in this directory.
+Compares a reference photometry type against one or more other types.
+By default: 2fwhm vs [3fwhm, templfit, sersic] when files exist.
 Plots are saved in ./plots (created automatically).
 """
 
+import argparse
 import os
 
 import matplotlib.pyplot as plt
@@ -30,6 +32,20 @@ def load_products(base_dir, prefix):
         "background": np.load(os.path.join(base_dir, f"background_noise_{prefix}.npy")),
         "percentiles": np.load(os.path.join(base_dir, f"percentiles_{prefix}.npy")),
     }
+
+
+def products_exist(base_dir, prefix):
+    needed = [
+        f"mean_sigma_{prefix}.npy",
+        f"std_sigma_{prefix}.npy",
+        f"background_noise_{prefix}.npy",
+        f"percentiles_{prefix}.npy",
+    ]
+    return all(os.path.exists(os.path.join(base_dir, n)) for n in needed)
+
+
+def build_prefix(hemisphere, phot_type):
+    return f"{hemisphere}_{phot_type}"
 
 
 def save_background_plot(labels, bg_a, bg_b, label_a, label_b, out_path):
@@ -93,66 +109,99 @@ def save_percentiles_plot(labels, p_a, p_b, label_a, label_b, out_path):
     plt.close(fig)
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Plot noise-product comparisons")
+    p.add_argument("--hemisphere", type=str, default="north", help="Noise-file hemisphere prefix")
+    p.add_argument("--ref-type", type=str, default="2fwhm", help="Reference photometry type")
+    p.add_argument(
+        "--compare-types",
+        nargs="+",
+        default=["3fwhm", "templfit", "sersic"],
+        help="Photometry types to compare against ref-type",
+    )
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     plots_dir = os.path.join(base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
-    prefix_a = "north_2fwhm"
-    prefix_b = "north_3fwhm"
-    label_a = "north_2fwhm"
-    label_b = "north_3fwhm"
+    prefix_a = build_prefix(args.hemisphere, args.ref_type)
+    label_a = prefix_a
 
     filter_list_path = os.path.join(base_dir, "filters_to_use.dat")
     labels = read_filter_labels(filter_list_path)
+    if not products_exist(base_dir, prefix_a):
+        raise FileNotFoundError(f"Missing noise products for reference type: {prefix_a}")
     products_a = load_products(base_dir, prefix_a)
-    products_b = load_products(base_dir, prefix_b)
 
-    save_background_plot(
-        labels,
-        products_a["background"],
-        products_b["background"],
-        label_a,
-        label_b,
-        os.path.join(plots_dir, "noise_compare_background_2v3fwhm.png"),
-    )
+    generated = []
+    for phot_type in args.compare_types:
+        prefix_b = build_prefix(args.hemisphere, phot_type)
+        if not products_exist(base_dir, prefix_b):
+            print(f"Skipping {prefix_b}: missing one or more required .npy files")
+            continue
 
-    save_sigma_grid(
-        labels,
-        products_a["mean_sigma"],
-        products_b["mean_sigma"],
-        label_a,
-        label_b,
-        os.path.join(plots_dir, "noise_compare_mean_sigma_2v3fwhm.png"),
-        ylabel="mean sigma [mag]",
-        title="Mean sigma per bin",
-    )
+        label_b = prefix_b
+        products_b = load_products(base_dir, prefix_b)
+        tag = f"{args.ref_type}_vs_{phot_type}"
 
-    save_sigma_grid(
-        labels,
-        products_a["std_sigma"],
-        products_b["std_sigma"],
-        label_a,
-        label_b,
-        os.path.join(plots_dir, "noise_compare_std_sigma_2v3fwhm.png"),
-        ylabel="std sigma [mag]",
-        title="Std sigma per bin",
-    )
+        bg_out = os.path.join(plots_dir, f"noise_compare_background_{tag}.png")
+        save_background_plot(
+            labels,
+            products_a["background"],
+            products_b["background"],
+            label_a,
+            label_b,
+            bg_out,
+        )
+        generated.append(bg_out)
 
-    save_percentiles_plot(
-        labels,
-        products_a["percentiles"],
-        products_b["percentiles"],
-        label_a,
-        label_b,
-        os.path.join(plots_dir, "noise_compare_percentiles_2v3fwhm.png"),
-    )
+        mean_out = os.path.join(plots_dir, f"noise_compare_mean_sigma_{tag}.png")
+        save_sigma_grid(
+            labels,
+            products_a["mean_sigma"],
+            products_b["mean_sigma"],
+            label_a,
+            label_b,
+            mean_out,
+            ylabel="mean sigma [mag]",
+            title="Mean sigma per bin",
+        )
+        generated.append(mean_out)
 
-    print("Generated plots:")
-    print(f"- {os.path.join(plots_dir, 'noise_compare_background_2v3fwhm.png')}")
-    print(f"- {os.path.join(plots_dir, 'noise_compare_mean_sigma_2v3fwhm.png')}")
-    print(f"- {os.path.join(plots_dir, 'noise_compare_std_sigma_2v3fwhm.png')}")
-    print(f"- {os.path.join(plots_dir, 'noise_compare_percentiles_2v3fwhm.png')}")
+        std_out = os.path.join(plots_dir, f"noise_compare_std_sigma_{tag}.png")
+        save_sigma_grid(
+            labels,
+            products_a["std_sigma"],
+            products_b["std_sigma"],
+            label_a,
+            label_b,
+            std_out,
+            ylabel="std sigma [mag]",
+            title="Std sigma per bin",
+        )
+        generated.append(std_out)
+
+        pct_out = os.path.join(plots_dir, f"noise_compare_percentiles_{tag}.png")
+        save_percentiles_plot(
+            labels,
+            products_a["percentiles"],
+            products_b["percentiles"],
+            label_a,
+            label_b,
+            pct_out,
+        )
+        generated.append(pct_out)
+
+    if generated:
+        print("Generated plots:")
+        for p in generated:
+            print(f"- {p}")
+    else:
+        print("No plots generated (all requested compare types were missing).")
 
 
 if __name__ == "__main__":

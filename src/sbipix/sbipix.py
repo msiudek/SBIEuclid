@@ -1082,7 +1082,7 @@ class sbipix():
 
         # --- detection using SNR (CRITICAL FIX) ---
         snr_threshold = float(self.noise_snr_threshold)
-        snr = flux_obs / np.maximum(sigma_lim, 1e-12)
+        snr = flux_obs / np.maximum(sigma_flux, 1e-12)
         detected = snr >= snr_threshold
 
         # --- convert to mag ---
