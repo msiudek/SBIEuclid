@@ -83,6 +83,10 @@ def parse_args():
                    choices=["templfit", "2fwhm", "3fwhm"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
                          "'2fwhm', or '3fwhm' aperture. Default: templfit"))
+    p.add_argument("--sigma-sampler", type=str, default="mag_empirical_interp",
+                   choices=["empirical", "truncnorm", "lognormal", "mag_lognormal", "mag_empirical_interp"],
+                   help=("Sigma sampler used by observational realism model. "
+                         "Default: mag_empirical_interp"))
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -218,7 +222,8 @@ def main():
     sx.include_limit   = True
     sx.include_sigma   = True
     sx.condition_sigma = True
-    sx.configure_noise_model(sigma_sampler="mag_lognormal", detection_model="hard")
+    sx.configure_noise_model(sigma_sampler=args.sigma_sampler, detection_model="hard")
+    print(f"  Sigma sampler: {sx.noise_sigma_sampler}")
     sx.load_obs_features()    # populates sx.limits, sx.mean_sigma_obs, sx.percentiles, etc.
     limits = sx.limits        # (n_filt,) in μJy
     print(f"  Flux limits (μJy): {np.array(limits).round(6)}")
