@@ -210,7 +210,8 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         sed = sed / norm_fac
         mstar = np.log10(sp.stellar_mass / norm_fac)
         mformed = np.log10(sp.formed_mass / norm_fac)
-        sfr = np.log10(np.mean(sfh[-100:]))  # Averaged over last 100 Myr
+        # sfh is in M☉/Gyr; convert to M☉/yr before taking log
+        sfr = np.log10(np.mean(sfh[-100:]) / 1e9)  # Averaged over last 100 Myr
 
         # Store SFH parameters
         sfh_tuple = np.array([mstar, mformed, sfr, tau, ti, Nparam])
@@ -325,7 +326,8 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
     
     # Ensure SFH is valid
     sfh = np.where(np.isnan(sfh) | (sfh < 1e-33), 1e-33, sfh)
-    sp.set_tabular_sfh(tax, sfh)
+    # sfh_delayed_exponential returns M☉/Gyr; FSPS set_tabular_sfh expects M☉/yr
+    sp.set_tabular_sfh(tax, sfh / 1e9)
 
     # Generate spectrum
     # Add small time offset to get latest SSPs
