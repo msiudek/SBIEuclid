@@ -327,7 +327,16 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
     # Ensure SFH is valid
     sfh = np.where(np.isnan(sfh) | (sfh < 1e-33), 1e-33, sfh)
     # sfh_delayed_exponential returns M☉/Gyr; FSPS set_tabular_sfh expects M☉/yr
-    sp.set_tabular_sfh(tax, sfh / 1e9)
+    sfh_yr = sfh / 1e9
+    # Apply floor after unit conversion to avoid all values dropping below the
+    # FSPS tabular-SFH minimum threshold.
+    sfh_yr = np.maximum(sfh_yr, 1e-30)
+    if np.nanmax(sfh_yr) < 1e-20:
+        print(
+            "WARNING: near-zero SFH in makespec_parametric "
+            f"(dust={dust:.3g}, met={met:.3g}, z={zval:.3g})"
+        )
+    sp.set_tabular_sfh(tax, sfh_yr)
 
     # Generate spectrum
     # Add small time offset to get latest SSPs
