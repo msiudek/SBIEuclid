@@ -1074,15 +1074,15 @@ class sbipix():
         # use local linearization around TRUE flux
         sigma_flux = (np.log(10) / 2.5) * flux_true * np.abs(sigma_mag)
 
-        # combine sampled noise and background noise floor in quadrature
-        sigma_flux = np.sqrt(np.maximum(sigma_flux, 0.0)**2 + np.maximum(sigma_lim, 0.0)**2)
+        # enforce background-noise floor (do not sum in quadrature)
+        sigma_flux = np.maximum(sigma_flux, sigma_lim)
 
         # --- ADD NOISE IN FLUX SPACE (CRITICAL FIX) ---
         flux_obs = flux_true + np.random.normal(0, sigma_flux)
 
         # --- detection using SNR (CRITICAL FIX) ---
         snr_threshold = float(self.noise_snr_threshold)
-        snr = flux_obs / np.maximum(sigma_flux, 1e-12)
+        snr = flux_obs / np.maximum(sigma_lim, 1e-12)
         detected = snr >= snr_threshold
 
         # --- convert to mag ---

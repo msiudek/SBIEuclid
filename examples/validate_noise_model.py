@@ -622,6 +622,80 @@ def load_or_simulate_model(model, args, outdir):
     )
 
 
+def plot_sigma_flux_over_flux_true(mock_data, model, outdir):
+    """Plot sigma_flux / flux_true as a function of true magnitude for all filters."""
+    n_filters = len(FILTER_SHORT)
+    ncols = 3
+    nrows = int(np.ceil(n_filters / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.6 * ncols, 3.6 * nrows), sharex=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    c = np.log(10) / 2.5
+    for fi, band in enumerate(FILTER_SHORT):
+        ax = axes[fi]
+        true_mag = mock_data["true_mag"][fi]
+        true_flux = mock_data["true_flux"][fi]
+        sigma_mag = mock_data["sigma"][fi]
+        measured_mag = mock_data["mag"][fi]
+        sigma_lim = float(model.limits[fi])
+
+        det = (
+            np.isfinite(true_mag)
+            & np.isfinite(true_flux)
+            & (true_flux > 0)
+            & np.isfinite(sigma_mag)
+            & (sigma_mag > 0)
+            & np.isfinite(measured_mag)
+            & (measured_mag < NONDET_MAG - 0.5)
+        )
+        if np.sum(det) == 0:
+            ax.set_title(f"{band} (no detected mock data)")
+            ax.set_yscale("log")
+            ax.grid(alpha=0.3)
+            continue
+
+        sigma_flux = c * true_flux[det] * np.abs(sigma_mag[det])
+        sigma_flux = np.maximum(sigma_flux, sigma_lim)
+        ratio = sigma_flux / np.maximum(true_flux[det], 1e-12)
+
+        ax.scatter(true_mag[det], ratio, s=3, alpha=0.2)
+
+        mag_bins = np.linspace(MAG_BRIGHT, MAG_FAINT, 25)
+        bidx = np.digitize(true_mag[det], mag_bins) - 1
+        xmed, ymed = [], []
+        for bi in range(len(mag_bins) - 1):
+            m = bidx == bi
+            if np.sum(m) < 30:
+                continue
+            xmed.append(0.5 * (mag_bins[bi] + mag_bins[bi + 1]))
+            ymed.append(np.nanmedian(ratio[m]))
+        if len(xmed) > 1:
+            ax.plot(xmed, ymed, color="tab:red", lw=2)
+
+        ax.set_title(band)
+        ax.set_yscale("log")
+        ax.set_ylim(1e-3, 2)
+        ax.grid(alpha=0.3)
+
+    for i in range(n_filters, len(axes)):
+        axes[i].axis("off")
+
+    for ax in axes[-ncols:]:
+        if ax.has_data():
+            ax.set_xlabel("True magnitude")
+    for r in range(nrows):
+        ax = axes[r * ncols]
+        if ax.has_data():
+            ax.set_ylabel(r"$\sigma_{flux} / flux_{true}$")
+
+    fig.suptitle(r"Noise ratio diagnostic: $\sigma_{flux}/flux_{true}$ vs true magnitude", y=0.995)
+    fig.tight_layout()
+    out = outdir / "sigma_flux_over_flux_true_ALL.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
 def save_validation_plots(real_data, mock_data, model, outdir):
     """Generate and save all validation plots."""
     debug_flux_scale(real_data, mock_data)
@@ -641,6 +715,11 @@ def save_validation_plots(real_data, mock_data, model, outdir):
     )
     saved.append(out)
     print(f"  {out.name}")
+
+    out = plot_sigma_flux_over_flux_true(mock_data, model, outdir)
+    if out:
+        saved.append(out)
+        print(f"  {out.name}")
 
     for fi in range(len(FILTER_SHORT)):
         out = plot_sigma_vs_mag(
