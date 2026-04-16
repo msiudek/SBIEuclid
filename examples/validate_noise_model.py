@@ -600,7 +600,6 @@ def build_validation_model(args, obs_dir, library_dir):
     model.configure_noise_model(
         sigma_sampler=args.sigma_sampler,
         detection_model=args.detection_model,
-        snr_threshold=SNR_DETECTION_THRESHOLD,
     )
     return model, noise_prefix, limits_file
 
@@ -622,80 +621,6 @@ def load_or_simulate_model(model, args, outdir):
     )
 
 
-def plot_sigma_flux_over_flux_true(mock_data, model, outdir):
-    """Plot sigma_flux / flux_true as a function of true magnitude for all filters."""
-    n_filters = len(FILTER_SHORT)
-    ncols = 3
-    nrows = int(np.ceil(n_filters / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.6 * ncols, 3.6 * nrows), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
-
-    c = np.log(10) / 2.5
-    for fi, band in enumerate(FILTER_SHORT):
-        ax = axes[fi]
-        true_mag = mock_data["true_mag"][fi]
-        true_flux = mock_data["true_flux"][fi]
-        sigma_mag = mock_data["sigma"][fi]
-        measured_mag = mock_data["mag"][fi]
-        sigma_lim = float(model.limits[fi])
-
-        det = (
-            np.isfinite(true_mag)
-            & np.isfinite(true_flux)
-            & (true_flux > 0)
-            & np.isfinite(sigma_mag)
-            & (sigma_mag > 0)
-            & np.isfinite(measured_mag)
-            & (measured_mag < NONDET_MAG - 0.5)
-        )
-        if np.sum(det) == 0:
-            ax.set_title(f"{band} (no detected mock data)")
-            ax.set_yscale("log")
-            ax.grid(alpha=0.3)
-            continue
-
-        sigma_flux = c * true_flux[det] * np.abs(sigma_mag[det])
-        sigma_flux = np.maximum(sigma_flux, sigma_lim)
-        ratio = sigma_flux / np.maximum(true_flux[det], 1e-12)
-
-        ax.scatter(true_mag[det], ratio, s=3, alpha=0.2)
-
-        mag_bins = np.linspace(MAG_BRIGHT, MAG_FAINT, 25)
-        bidx = np.digitize(true_mag[det], mag_bins) - 1
-        xmed, ymed = [], []
-        for bi in range(len(mag_bins) - 1):
-            m = bidx == bi
-            if np.sum(m) < 30:
-                continue
-            xmed.append(0.5 * (mag_bins[bi] + mag_bins[bi + 1]))
-            ymed.append(np.nanmedian(ratio[m]))
-        if len(xmed) > 1:
-            ax.plot(xmed, ymed, color="tab:red", lw=2)
-
-        ax.set_title(band)
-        ax.set_yscale("log")
-        ax.set_ylim(1e-3, 2)
-        ax.grid(alpha=0.3)
-
-    for i in range(n_filters, len(axes)):
-        axes[i].axis("off")
-
-    for ax in axes[-ncols:]:
-        if ax.has_data():
-            ax.set_xlabel("True magnitude")
-    for r in range(nrows):
-        ax = axes[r * ncols]
-        if ax.has_data():
-            ax.set_ylabel(r"$\sigma_{flux} / flux_{true}$")
-
-    fig.suptitle(r"Noise ratio diagnostic: $\sigma_{flux}/flux_{true}$ vs true magnitude", y=0.995)
-    fig.tight_layout()
-    out = outdir / "sigma_flux_over_flux_true_ALL.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return out
-
-
 def save_validation_plots(real_data, mock_data, model, outdir):
     """Generate and save all validation plots."""
     debug_flux_scale(real_data, mock_data)
@@ -715,11 +640,6 @@ def save_validation_plots(real_data, mock_data, model, outdir):
     )
     saved.append(out)
     print(f"  {out.name}")
-
-    out = plot_sigma_flux_over_flux_true(mock_data, model, outdir)
-    if out:
-        saved.append(out)
-        print(f"  {out.name}")
 
     for fi in range(len(FILTER_SHORT)):
         out = plot_sigma_vs_mag(
@@ -807,8 +727,8 @@ def build_parser():
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", "--skip-sim", action="store_true",
                    help="Skip simulation step; load existing atlas instead")
-    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal", "mag_lognormal", "mag_empirical_interp"], default="mag_empirical_interp",
-                   help="Distribution used to sample sigma values (default: mag_empirical_interp; interpolates empirical median/std sigma vs true mag per band)")
+    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal", "mag_lognormal"], default="empirical",
+                   help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
     p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
     p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="vis_yj2d",
@@ -834,12 +754,6 @@ def main():
     library_dir = project_root / "library"
     library_dir.mkdir(parents=True, exist_ok=True)
     outdir = project_root / args.outdir
-    if outdir.exists() and not outdir.is_dir():
-        raise RuntimeError(
-            f"Requested --outdir points to an existing file: {outdir}. "
-            "Use a directory path for --outdir and a different filename for tee output "
-            "(for example: --outdir sbi-logs/validate_v21 and tee sbi-logs/validate_v21.log)."
-        )
     outdir.mkdir(parents=True, exist_ok=True)
 
     fits_path = CATALOG_FILE
@@ -851,11 +765,6 @@ def main():
     if args.sigma_sampler == "mag_lognormal" and not hasattr(model, "_sample_sigma_mag_lognormal"):
         raise RuntimeError(
             "Requested --sigma-sampler mag_lognormal, but loaded sbipix does not support it. "
-            "Ensure you run from this repo and that local src/ is used (or reinstall package in editable mode)."
-        )
-    if args.sigma_sampler == "mag_empirical_interp" and not hasattr(model, "_sample_sigma_mag_empirical_interp"):
-        raise RuntimeError(
-            "Requested --sigma-sampler mag_empirical_interp, but loaded sbipix does not support it. "
             "Ensure you run from this repo and that local src/ is used (or reinstall package in editable mode)."
         )
 

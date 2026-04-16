@@ -166,14 +166,10 @@ class sbipix():
         self.condition_sigma = False
         self.noise_sigma_sampler = 'empirical'
         self.noise_detection_model = 'hard'
-        self.noise_snr_threshold = 2.0
         self.noise_sigma_mag_params = None
         self.noise_sigma_mag_ranges = None
         self.noise_sigma_mag_min = 1e-6
         self.noise_sigma_mag_max = 10.0
-        self.noise_sigma_interp_mag_centers = None
-        self.noise_sigma_interp_medians = None
-        self.noise_sigma_interp_stds = None
         
         # Observational properties (loaded from files)
         self.mean_sigma_obs = None
@@ -285,15 +281,12 @@ class sbipix():
 
     def configure_noise_model(self,
                               sigma_sampler=None,
-                              detection_model=None,
-                              snr_threshold=None):
+                              detection_model=None):
         """Configure how observational uncertainties are sampled."""
         if sigma_sampler is not None:
             self.noise_sigma_sampler = str(sigma_sampler)
         if detection_model is not None:
             self.noise_detection_model = str(detection_model)
-        if snr_threshold is not None:
-            self.noise_snr_threshold = float(snr_threshold)
 
     def _compute_bin_centers(self, filter_idx):
         """Return magnitude-bin centers from percentile boundaries."""
@@ -438,120 +431,6 @@ class sbipix():
 
         return mag_errs_det
 
-    def _prepare_sigma_empirical_interp_params(self):
-        """Prepare per-filter interpolants using empirical sigma medians/scatter vs magnitude."""
-        n_filters = self.mean_sigma_obs.shape[0]
-        n_bins = self.mean_sigma_obs.shape[1]
-
-        centers_all = np.full((n_filters, n_bins), np.nan, dtype=float)
-        medians_all = np.full((n_filters, n_bins), np.nan, dtype=float)
-        stds_all = np.full((n_filters, n_bins), np.nan, dtype=float)
-
-        for filter_idx in range(n_filters):
-            percentiles_f = np.asarray(self.percentiles[:, filter_idx], dtype=float)
-            if percentiles_f.size >= 2 and np.isfinite(percentiles_f).all():
-                centers = 0.5 * (percentiles_f[:-1] + percentiles_f[1:])
-            else:
-                centers = np.arange(n_bins, dtype=float) + 20.0
-
-            centers = np.asarray(centers, dtype=float)
-            if centers.size != n_bins:
-                centers = np.linspace(20.0, 28.0, n_bins)
-
-            med = np.asarray(self.mean_sigma_obs[filter_idx], dtype=float)
-            std = np.asarray(self.stds_sigma_obs[filter_idx], dtype=float)
-
-            if self.sigma_samples_obs is not None:
-                for bin_idx in range(n_bins):
-                    vals = np.asarray(self.sigma_samples_obs[filter_idx, bin_idx], dtype=float).ravel()
-                    vals = vals[np.isfinite(vals) & (vals > 0)]
-                    if vals.size >= 5:
-                        med[bin_idx] = float(np.nanmedian(vals))
-                        std_val = float(np.nanstd(vals))
-                        std[bin_idx] = std_val if np.isfinite(std_val) and std_val > 0 else std[bin_idx]
-
-            med = np.where(np.isfinite(med) & (med > 0), med, np.nan)
-            std = np.where(np.isfinite(std) & (std > 0), std, np.nan)
-
-            valid = np.isfinite(centers) & np.isfinite(med)
-            if np.sum(valid) < 2:
-                finite_med = med[np.isfinite(med)]
-                fallback_med = float(np.nanmedian(finite_med)) if finite_med.size else 0.1
-                fallback_std = float(np.nanmedian(std[np.isfinite(std)])) if np.any(np.isfinite(std)) else 0.03
-                centers = np.linspace(20.0, 28.0, n_bins)
-                med = np.full(n_bins, max(fallback_med, 1e-4), dtype=float)
-                std = np.full(n_bins, max(fallback_std, 1e-4), dtype=float)
-            else:
-                good_centers = centers[valid]
-                order = np.argsort(good_centers)
-                good_centers = good_centers[order]
-                good_med = med[valid][order]
-                good_std = std[valid][order] if np.sum(np.isfinite(std[valid])) > 0 else np.full_like(good_med, np.nan)
-
-                centers = good_centers
-                med = good_med
-                if good_std.shape != good_med.shape:
-                    good_std = np.full_like(good_med, np.nan)
-                finite_std = np.isfinite(good_std) & (good_std > 0)
-                if np.any(finite_std):
-                    fill_std = float(np.nanmedian(good_std[finite_std]))
-                    good_std = np.where(finite_std, good_std, fill_std)
-                else:
-                    good_std = np.full_like(good_med, max(0.3 * np.nanmedian(good_med), 1e-4))
-                std = good_std
-
-            keep_n = min(len(centers), n_bins)
-            centers_all[filter_idx, :keep_n] = centers[:keep_n]
-            medians_all[filter_idx, :keep_n] = med[:keep_n]
-            stds_all[filter_idx, :keep_n] = std[:keep_n]
-
-        self.noise_sigma_interp_mag_centers = centers_all
-        self.noise_sigma_interp_medians = medians_all
-        self.noise_sigma_interp_stds = stds_all
-
-    def _sample_sigma_mag_empirical_interp(self, mags_det, filter_idx):
-        """Sample sigma by interpolating empirical median/std vs true magnitude."""
-        if self.noise_sigma_interp_mag_centers is None:
-            self._prepare_sigma_empirical_interp_params()
-
-        mags_det = np.asarray(mags_det, dtype=float)
-        centers = np.asarray(self.noise_sigma_interp_mag_centers[filter_idx], dtype=float)
-        medians = np.asarray(self.noise_sigma_interp_medians[filter_idx], dtype=float)
-        stds = np.asarray(self.noise_sigma_interp_stds[filter_idx], dtype=float)
-
-        valid = np.isfinite(centers) & np.isfinite(medians) & (medians > 0)
-        if np.sum(valid) < 2:
-            fallback = np.nanmedian(medians[valid]) if np.any(valid) else 0.1
-            return np.full_like(mags_det, max(float(fallback), 1e-4), dtype=float)
-
-        x = centers[valid]
-        y_med = medians[valid]
-        y_std = stds[valid]
-        ord_idx = np.argsort(x)
-        x = x[ord_idx]
-        y_med = y_med[ord_idx]
-        y_std = y_std[ord_idx]
-
-        finite_std = np.isfinite(y_std) & (y_std > 0)
-        if np.any(finite_std):
-            y_std = np.where(finite_std, y_std, np.nanmedian(y_std[finite_std]))
-        else:
-            y_std = np.full_like(y_med, max(0.3 * np.nanmedian(y_med), 1e-4))
-
-        mags_clip = np.clip(mags_det, np.nanmin(x), np.nanmax(x))
-        med_i = np.interp(mags_clip, x, y_med)
-        std_i = np.interp(mags_clip, x, y_std)
-        std_i = np.clip(std_i, 1e-4, None)
-
-        med_i = np.clip(med_i, 1e-6, None)
-        ratio = np.clip(std_i / med_i, 1e-6, None)
-        sampled = np.random.lognormal(
-            mean=np.log(med_i) - 0.5 * ratio**2,
-            sigma=ratio,
-        )
-        sampled = np.clip(sampled, self.noise_sigma_mag_min, self.noise_sigma_mag_max)
-        return sampled
-
     def _draw_detection_mask(self, flux_obs, sigma_flux, limit_flux):
         """Return detection mask using either a hard threshold or a smooth S/N transition."""
         flux_obs = np.asarray(flux_obs, dtype=float)
@@ -565,7 +444,7 @@ class sbipix():
 
         if self.noise_detection_model == 'probabilistic':
             snr_obs = flux_obs[finite] / np.maximum(sigma_flux[finite], 1e-12)
-            snr_threshold = float(self.noise_snr_threshold)
+            snr_threshold = 1.0
             snr_width = 1.0
             delta_snr = snr_obs - snr_threshold
             p_detect = 0.5 * (1.0 + np.tanh(delta_snr / snr_width))
@@ -814,7 +693,6 @@ class sbipix():
             self.limits = self.limits[keep]
 
         self._prepare_sigma_mag_lognormal_params()
-        self._prepare_sigma_empirical_interp_params()
 
         print('Observational features loaded')        
 
@@ -1042,23 +920,15 @@ class sbipix():
         bin_indices = np.digitize(mags, self.percentiles[:, filter_idx]) - 1
         bin_indices = np.clip(bin_indices, 0, n_bins - 1)
 
-        # sample σ_mag from configured distribution
+        # sample σ_mag from empirical or parametric distribution
         use_empirical_sigma = (
             self.noise_sigma_sampler == 'empirical' and self.sigma_samples_obs is not None
         )
-        use_empirical_interp = self.noise_sigma_sampler == 'mag_empirical_interp'
-        use_mag_lognormal = self.noise_sigma_sampler == 'mag_lognormal'
-
-        if use_mag_lognormal:
-            sigma_mag = np.asarray(self._sample_sigma_mag_lognormal(mags, filter_idx), dtype=float)
-        elif use_empirical_interp:
-            sigma_mag = np.asarray(self._sample_sigma_mag_empirical_interp(mags, filter_idx), dtype=float)
-        elif use_empirical_sigma:
+        if use_empirical_sigma:
             sigma_mag = np.zeros_like(mags)
             for i in range(len(mags)):
                 samples = self.sigma_samples_obs[filter_idx, bin_indices[i]]
                 vals = np.asarray(samples, dtype=float).ravel()
-                vals = vals[np.isfinite(vals) & (vals > 0)]
                 if len(vals) > 0:
                     sigma_mag[i] = np.random.choice(vals)
                 else:
@@ -1068,26 +938,19 @@ class sbipix():
             std  = self.stds_sigma_obs[filter_idx, bin_indices]
             sigma_mag = np.random.normal(mean, std)
 
-        sigma_mag = np.where(np.isfinite(sigma_mag) & (sigma_mag > 0), sigma_mag, 1e-3)
+        # --- convert σ_mag → σ_flux properly ---
+        # use local linearization around TRUE flux
+        sigma_flux = (np.log(10) / 2.5) * flux_true * np.abs(sigma_mag)
 
-        # --- convert sigma_mag → sigma_flux (CORRECTED) ---
-        flux_ref = mag_conversion(mags, convert_to='flux')
-        sigma_flux = (np.log(10) / 2.5) * flux_ref * np.abs(sigma_mag)
-
-        # enforce floor
+        # enforce minimum background noise
         sigma_flux = np.maximum(sigma_flux, sigma_lim)
 
-        finite_ratio = np.isfinite(flux_true) & (flux_true > 0) & np.isfinite(sigma_flux)
-        if np.any(finite_ratio):
-            print("median sigma_flux / flux_true:", np.median(sigma_flux[finite_ratio] / flux_true[finite_ratio]))
+        # --- ADD NOISE IN FLUX SPACE (CRITICAL FIX) ---
+        flux_obs = flux_true + np.random.normal(0, sigma_flux)
 
-        # --- add noise ---
-        noise = np.random.normal(0, sigma_flux)
-        flux_obs = np.maximum(flux_true + noise, 0.0)
-
-        # --- detection ---
-        snr_threshold = float(self.noise_snr_threshold)
-        snr = flux_true / np.maximum(sigma_flux, 1e-12)
+        # --- detection using SNR (CRITICAL FIX) ---
+        snr_threshold = getattr(self, 'snr_threshold', 1.0)
+        snr = flux_obs / np.maximum(sigma_flux, 1e-12)
         detected = snr >= snr_threshold
 
         # --- convert to mag ---
