@@ -1070,19 +1070,24 @@ class sbipix():
 
         sigma_mag = np.where(np.isfinite(sigma_mag) & (sigma_mag > 0), sigma_mag, 1e-3)
 
-        # --- convert σ_mag → σ_flux properly ---
-        # use local linearization around TRUE flux
-        sigma_flux = (np.log(10) / 2.5) * flux_true * np.abs(sigma_mag)
+        # --- convert sigma_mag → sigma_flux (CORRECTED) ---
+        flux_ref = mag_conversion(mags, convert_to='flux')
+        sigma_flux = (np.log(10) / 2.5) * flux_ref * np.abs(sigma_mag)
 
-        # enforce background-noise floor (do not sum in quadrature)
+        # enforce floor
         sigma_flux = np.maximum(sigma_flux, sigma_lim)
 
-        # --- ADD NOISE IN FLUX SPACE (CRITICAL FIX) ---
-        flux_obs = flux_true + np.random.normal(0, sigma_flux)
+        finite_ratio = np.isfinite(flux_true) & (flux_true > 0) & np.isfinite(sigma_flux)
+        if np.any(finite_ratio):
+            print("median sigma_flux / flux_true:", np.median(sigma_flux[finite_ratio] / flux_true[finite_ratio]))
 
-        # --- detection using SNR (CRITICAL FIX) ---
+        # --- add noise ---
+        noise = np.random.normal(0, sigma_flux)
+        flux_obs = np.maximum(flux_true + noise, 0.0)
+
+        # --- detection ---
         snr_threshold = float(self.noise_snr_threshold)
-        snr = flux_obs / np.maximum(sigma_flux, 1e-12)
+        snr = flux_true / np.maximum(sigma_flux, 1e-12)
         detected = snr >= snr_threshold
 
         # --- convert to mag ---
