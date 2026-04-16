@@ -5,7 +5,11 @@ from astropy.table import Table
 import os
 
 # NumPy <2.0 uses trapz; >=2.0 uses trapezoid
-_trapezoid = getattr(np, "trapezoid", np.trapz)
+def _trapezoid(y, x):
+    trapezoid = getattr(np, "trapezoid", None)
+    if trapezoid is not None:
+        return trapezoid(y, x)
+    return getattr(np, "trapz")(y, x)
 
 # Hard-coded configuration
 FITS_PATH = "COSMOS_DEEP.fits"
