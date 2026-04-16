@@ -65,29 +65,32 @@ def build_phot_col(stem, phot_type, err=False):
     return f"{prefix}_{stem}_{phot_type}_aper"
 
 
-def resolve_phot_type_in_catalog(cat, requested_phot_type):
-    """Resolve an available photometry type in catalog, with ordered fallback."""
-    ordered = [requested_phot_type] + [pt for pt in ["templfit", "2fwhm", "3fwhm"] if pt != requested_phot_type]
+def validate_requested_phot_type(cat, requested_phot_type):
+    """Validate that all required columns for requested phot_type exist."""
+    missing_flux = [
+        build_phot_col(stem, requested_phot_type, err=False)
+        for stem in FILTER_STEMS
+        if build_phot_col(stem, requested_phot_type, err=False) not in cat.colnames
+    ]
+    missing_err = [
+        build_phot_col(stem, requested_phot_type, err=True)
+        for stem in FILTER_STEMS
+        if build_phot_col(stem, requested_phot_type, err=True) not in cat.colnames
+    ]
 
-    def missing_flux_cols(phot_type):
-        return [build_phot_col(stem, phot_type, err=False) for stem in FILTER_STEMS
-                if build_phot_col(stem, phot_type, err=False) not in cat.colnames]
+    if len(missing_flux) > 0:
+        raise KeyError(
+            f"Requested phot_type='{requested_phot_type}' is missing {len(missing_flux)}/{N_FILT} "
+            f"required flux columns. Missing examples: {missing_flux[:4]}. "
+            "No fallback is applied."
+        )
 
-    diagnostics = {}
-    for phot_type in ordered:
-        missing = missing_flux_cols(phot_type)
-        diagnostics[phot_type] = missing
-        if len(missing) == 0:
-            return phot_type, diagnostics
-
-    details = []
-    for phot_type in ["templfit", "2fwhm", "3fwhm"]:
-        miss = diagnostics.get(phot_type, [])
-        details.append(f"{phot_type}: missing {len(miss)} / {N_FILT} flux columns")
-    raise KeyError(
-        "No supported photometry column set found in catalog. "
-        + " | ".join(details)
-    )
+    if len(missing_err) > 0:
+        raise KeyError(
+            f"Requested phot_type='{requested_phot_type}' is missing {len(missing_err)}/{N_FILT} "
+            f"required fluxerr columns. Missing examples: {missing_err[:4]}. "
+            "No fallback is applied."
+        )
 
 
 def parse_args():
@@ -219,17 +222,10 @@ def main():
     N_total = len(cat)
     print(f"  {N_total} total matched galaxies")
 
-    effective_phot_type, diagnostics = resolve_phot_type_in_catalog(cat, requested_phot_type)
-    if effective_phot_type != requested_phot_type:
-        req_missing = diagnostics[requested_phot_type]
-        print(
-            f"WARNING: requested phot_type='{requested_phot_type}' is unavailable "
-            f"(missing {len(req_missing)} flux columns; e.g. {req_missing[:2]})."
-        )
-        print(f"         Falling back to phot_type='{effective_phot_type}'.")
-
+    validate_requested_phot_type(cat, requested_phot_type)
+    effective_phot_type = requested_phot_type
     noise_prefix = f"north_{effective_phot_type}"
-    print(f"Photometry type: requested={requested_phot_type}, used={effective_phot_type}  (noise prefix: {noise_prefix})")
+    print(f"Photometry type: {effective_phot_type}  (noise prefix: {noise_prefix})")
 
     # Build flux and fluxerr arrays (n_gal, n_filt) in μJy
     try:
