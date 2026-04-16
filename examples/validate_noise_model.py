@@ -520,8 +520,17 @@ def load_real_data(fits_path, patch_id=PATCH_ID, phot_type=None, snr_min=SNR_DET
     real_valid = np.zeros((n_filt, n_gal), dtype=bool)
 
     for fi, stem in enumerate(FILTER_COL_STEMS):
-        fcol = f"flux_{stem}_{phot_type}_aper"
-        ecol = f"fluxerr_{stem}_{phot_type}_aper"
+        # templfit uses a different column naming convention (no _aper suffix)
+        if phot_type == "templfit":
+            if stem == "vis":
+                fcol = "flux_vis_psf"
+                ecol = "fluxerr_vis_psf"
+            else:
+                fcol = f"flux_{stem}_templfit"
+                ecol = f"fluxerr_{stem}_templfit"
+        else:
+            fcol = f"flux_{stem}_{phot_type}_aper"
+            ecol = f"fluxerr_{stem}_{phot_type}_aper"
         if fcol not in cat.colnames:
             print(f"  WARNING: column {fcol!r} not found — filter {FILTER_SHORT[fi]} skipped")
             continue

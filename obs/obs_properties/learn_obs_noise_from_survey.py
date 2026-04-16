@@ -12,9 +12,10 @@ def _trapezoid(y, x):
     return getattr(np, "trapz")(y, x)
 
 # Hard-coded configuration
-FITS_PATH = "COSMOS_DEEP.fits"
-FILTER_LIST_FILE = "filters_to_use.dat"
-FILTER_DIR = "."
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FITS_PATH = os.path.join(SCRIPT_DIR, "COSMOS_DEEP.fits")
+FILTER_LIST_FILE = os.path.join(SCRIPT_DIR, "filters_to_use.dat")
+FILTER_DIR = SCRIPT_DIR
 OUT_DIR = "."
 # Photometry types to process:
 #   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
