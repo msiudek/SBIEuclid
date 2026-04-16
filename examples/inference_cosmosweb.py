@@ -63,6 +63,33 @@ def build_phot_col(stem, phot_type, err=False):
     if phot_type == "templfit":
         return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
     return f"{prefix}_{stem}_{phot_type}_aper"
+
+
+def resolve_phot_type_in_catalog(cat, requested_phot_type):
+    """Resolve an available photometry type in catalog, with ordered fallback."""
+    ordered = [requested_phot_type] + [pt for pt in ["templfit", "2fwhm", "3fwhm"] if pt != requested_phot_type]
+
+    def missing_flux_cols(phot_type):
+        return [build_phot_col(stem, phot_type, err=False) for stem in FILTER_STEMS
+                if build_phot_col(stem, phot_type, err=False) not in cat.colnames]
+
+    diagnostics = {}
+    for phot_type in ordered:
+        missing = missing_flux_cols(phot_type)
+        diagnostics[phot_type] = missing
+        if len(missing) == 0:
+            return phot_type, diagnostics
+
+    details = []
+    for phot_type in ["templfit", "2fwhm", "3fwhm"]:
+        miss = diagnostics.get(phot_type, [])
+        details.append(f"{phot_type}: missing {len(miss)} / {N_FILT} flux columns")
+    raise KeyError(
+        "No supported photometry column set found in catalog. "
+        + " | ".join(details)
+    )
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="SBI mass inference on COSMOS-Web matched catalog")
     p.add_argument("--n-gal",       type=int,   default=500,
@@ -182,8 +209,7 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
-    noise_prefix = f"north_{args.phot_type}"
-    print(f"Photometry type: {args.phot_type}  (noise prefix: {noise_prefix})")
+    requested_phot_type = args.phot_type
 
     # ------------------------------------------------------------------
     # 1. Load catalog and apply selection
@@ -193,13 +219,31 @@ def main():
     N_total = len(cat)
     print(f"  {N_total} total matched galaxies")
 
+    effective_phot_type, diagnostics = resolve_phot_type_in_catalog(cat, requested_phot_type)
+    if effective_phot_type != requested_phot_type:
+        req_missing = diagnostics[requested_phot_type]
+        print(
+            f"WARNING: requested phot_type='{requested_phot_type}' is unavailable "
+            f"(missing {len(req_missing)} flux columns; e.g. {req_missing[:2]})."
+        )
+        print(f"         Falling back to phot_type='{effective_phot_type}'.")
+
+    noise_prefix = f"north_{effective_phot_type}"
+    print(f"Photometry type: requested={requested_phot_type}, used={effective_phot_type}  (noise prefix: {noise_prefix})")
+
     # Build flux and fluxerr arrays (n_gal, n_filt) in μJy
     try:
-        flux    = np.column_stack([np.array(cat[build_phot_col(s, args.phot_type, err=False)], dtype=float) for s in FILTER_STEMS])
-        fluxerr = np.column_stack([np.array(cat[build_phot_col(s, args.phot_type, err=True)],  dtype=float) for s in FILTER_STEMS])
+        flux = np.column_stack([
+            np.array(cat[build_phot_col(stem, effective_phot_type, err=False)], dtype=float)
+            for stem in FILTER_STEMS
+        ])
+        fluxerr = np.column_stack([
+            np.array(cat[build_phot_col(stem, effective_phot_type, err=True)], dtype=float)
+            for stem in FILTER_STEMS
+        ])
     except KeyError as exc:
         raise KeyError(
-            f"Column {exc} not found in catalog for phot_type='{args.phot_type}'. "
+            f"Column {exc} not found in catalog for phot_type='{effective_phot_type}'. "
             "For 'templfit' the matched catalog must include templfit/psf columns "
             "(re-run the catalog matching script to add them)."
         ) from exc
