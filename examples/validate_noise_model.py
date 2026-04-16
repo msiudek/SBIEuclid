@@ -2,7 +2,7 @@
 validate_noise_model.py — Pre-training data-space validation.
 
 Runs sbipix simulate + noise injection, loads real COSMOS-Deep photometry
-(selected aperture), and produces side-by-side diagnostic plots to confirm
+(selected photometry type), and produces side-by-side diagnostic plots to confirm
 that mock observations match real data within ~10-20% before training.
 
 Plots saved to  sbi-logs/validate_<filter>/  :
@@ -17,7 +17,7 @@ Usage:
     python examples/validate_noise_model.py \
         --n-sim 100000 \
         --skip-sim \
-        --aperture 2fwhm \
+        --phot-type 2fwhm \
         --outdir sbi-logs/validate_sSFRlogNormal_v5.0 \
         --detection-model hard \
         --mock-match vis_yj2d \
@@ -487,7 +487,7 @@ def debug_flux_scale(real_data, mock_data):
         print(f"{band:>10s}: mock/real flux ratio = {ratio:.3f}")
 
 
-def load_real_data(fits_path, patch_id=PATCH_ID, aperture=None, snr_min=SNR_DETECTION_THRESHOLD):
+def load_real_data(fits_path, patch_id=PATCH_ID, phot_type=None, snr_min=SNR_DETECTION_THRESHOLD):
     """
     Load photometry from COSMOS-Deep FITS catalog.
 
@@ -495,10 +495,10 @@ def load_real_data(fits_path, patch_id=PATCH_ID, aperture=None, snr_min=SNR_DETE
     """
     from astropy.table import Table
 
-    if aperture is None:
-        raise ValueError("aperture must be provided explicitly")
+    if phot_type is None:
+        raise ValueError("phot_type must be provided explicitly")
 
-    print(f"Loading real data from {fits_path}  (patch_id={patch_id}, aperture={aperture})")
+    print(f"Loading real data from {fits_path}  (patch_id={patch_id}, phot_type={phot_type})")
     cat = Table.read(fits_path)
     # Patch selection
     patch_col = cat["patch_id_list"]
@@ -520,8 +520,8 @@ def load_real_data(fits_path, patch_id=PATCH_ID, aperture=None, snr_min=SNR_DETE
     real_valid = np.zeros((n_filt, n_gal), dtype=bool)
 
     for fi, stem in enumerate(FILTER_COL_STEMS):
-        fcol = f"flux_{stem}_{aperture}_aper"
-        ecol = f"fluxerr_{stem}_{aperture}_aper"
+        fcol = f"flux_{stem}_{phot_type}_aper"
+        ecol = f"fluxerr_{stem}_{phot_type}_aper"
         if fcol not in cat.colnames:
             print(f"  WARNING: column {fcol!r} not found — filter {FILTER_SHORT[fi]} skipped")
             continue
@@ -576,7 +576,7 @@ def build_validation_model(args, obs_dir, library_dir):
     from sbipix import sbipix
 
     model = sbipix()
-    noise_prefix = f"north_{args.aperture}"
+    noise_prefix = f"north_{args.phot_type}"
     limits_file = f"background_noise_{noise_prefix}.npy"
     model.configure_filters(
         filter_list="filters_to_use.dat",
@@ -718,9 +718,9 @@ def build_parser():
     p = argparse.ArgumentParser(
         description="Pre-training validation: compare mock noise model to real COSMOS data"
     )
-    p.add_argument("--aperture", default="3fwhm",
-                   choices=["2fwhm", "3fwhm"],
-                   help="Aperture to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
+    p.add_argument("--phot-type", default="3fwhm",
+                   choices=["2fwhm", "3fwhm", "templfit"],
+                   help="Photometry type to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
     p.add_argument("--n-sim", type=int, default=10000,
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
     p.add_argument("--outdir", default="sbi-logs/validate",
@@ -838,7 +838,7 @@ def main():
     # ------------------------------------------------------------------
     print("[3/3] Loading real COSMOS data...")
     real_data = load_real_data(
-        fits_path, patch_id=PATCH_ID, aperture=args.aperture
+        fits_path, patch_id=PATCH_ID, phot_type=args.phot_type
     )
 
     # ------------------------------------------------------------------
