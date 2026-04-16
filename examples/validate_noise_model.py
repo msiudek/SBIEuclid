@@ -132,8 +132,13 @@ def compute_mock_match_weights(real_data, mock_data):
     # --- mock ---
     mock_vis = mock_data["mag"][vis_idx]
     mock_yj  = mock_data["mag"][y_idx] - mock_data["mag"][j_idx]
+    # Use the same SNR-based detection criterion as real data:
+    #   SNR = (2.5 / ln10) / mag_err  for a magnitude-error sigma
+    _LN10 = np.log(10)
+    mock_vis_sigma = mock_data["sigma"][vis_idx]
+    mock_vis_snr = np.where(mock_vis_sigma > 0, (2.5 / _LN10) / mock_vis_sigma, 0.0)
     mock_ok  = (
-        np.isfinite(mock_vis) & (mock_vis < NONDET_MAG - 0.5)
+        np.isfinite(mock_vis) & (mock_vis_snr >= SNR_DETECTION_THRESHOLD)
         & np.isfinite(mock_yj)
     )
 
@@ -610,6 +615,8 @@ def build_validation_model(args, obs_dir, library_dir):
         sigma_sampler=args.sigma_sampler,
         detection_model=args.detection_model,
     )
+    # Enforce the SAME SNR detection threshold in mocks as used for real data selection
+    model.snr_threshold = SNR_DETECTION_THRESHOLD
     return model, noise_prefix, limits_file
 
 
@@ -740,8 +747,8 @@ def build_parser():
                    help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
     p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
-    p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="vis_yj2d",
-                   help="Reweight/resample mocks to match real observed distributions (default: vis_yj2d = 2D VIS×(Y-J) histogram)")
+    p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="none",
+                   help="Reweight/resample mocks to match real observed distributions (default: none)")
     p.add_argument("--calibrate", action="store_true",
                    help="Apply per-band median magnitude calibration after mock-matching: "
                         "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
