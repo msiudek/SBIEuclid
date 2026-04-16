@@ -210,8 +210,8 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         sed = sed / norm_fac
         mstar = np.log10(sp.stellar_mass / norm_fac)
         mformed = np.log10(sp.formed_mass / norm_fac)
-        # sfh is in M☉/Gyr; convert to M☉/yr before taking log
-        sfr = np.log10(np.mean(sfh[-100:]) / 1e9)  # Averaged over last 100 Myr
+        # sfh has been converted to M☉/yr (see line 159), so store log10(SFR in M☉/yr)
+        sfr = np.log10(np.mean(sfh[-100:]))  # Averaged over last ~100 Myr
 
         # Store SFH parameters
         sfh_tuple = np.array([mstar, mformed, sfr, tau, ti, Nparam])
@@ -326,10 +326,10 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
     
     # Ensure SFH is valid
     sfh = np.where(np.isnan(sfh) | (sfh < 1e-33), 1e-33, sfh)
-    # sfh_delayed_exponential returns M☉/Gyr; FSPS set_tabular_sfh expects M☉/yr
-    sfh_yr = sfh / 1e9
-    # Apply floor after unit conversion to avoid all values dropping below the
-    # FSPS tabular-SFH minimum threshold.
+    # NOTE: sfh is already converted from M☉/Gyr to M☉/yr in generate_atlas_parametric
+    # (line 159), so we use it directly without further unit conversion
+    sfh_yr = sfh
+    # Apply floor to avoid all values dropping below FSPS tabular-SFH minimum threshold
     sfh_yr = np.maximum(sfh_yr, 1e-30)
     if np.nanmax(sfh_yr) < 1e-20:
         print(
