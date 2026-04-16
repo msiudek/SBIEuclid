@@ -87,19 +87,29 @@ def parse_args():
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
                    help="Random seed for galaxy selection (default: 42)")
+    p.add_argument("--infer-snr-threshold", type=float, default=1.0,
+                   help=(
+                       "Inference-side SNR detection threshold used when building obs vectors "
+                       "from flux/fluxerr (default: 1.0)."
+                   ))
+    p.add_argument("--snr-threshold-sweep", type=float, nargs="*", default=[],
+                   help=(
+                       "Optional extra inference-side thresholds for no-retraining bias test, "
+                       "e.g. --snr-threshold-sweep 3 5 10. Uses same selected galaxies and model."
+                   ))
     return p.parse_args()
 
 
 # ── photometry helpers ─────────────────────────────────────────────────────
 
-def build_obs_array(flux_2d, fluxerr_2d, limits):
+def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0):
     """
     Convert (n_gal, n_filt) flux/fluxerr (μJy) arrays to the 20-dim
     observation vector expected by the sbipix model:
         [mag_0, sig_0, mag_1, sig_1, ..., mag_9, sig_9]  (interleaved)
     which gets reshaped to (n_gal, 2*n_filt).
 
-    Non-detections (flux < limit or non-finite) get mag=99 and
+    Non-detections (flux < limit, SNR < snr_threshold, or non-finite) get mag=99 and
     mag_sigma = mag(limit).
     """
     n_gal = flux_2d.shape[0]
@@ -108,7 +118,10 @@ def build_obs_array(flux_2d, fluxerr_2d, limits):
     for j, lim in enumerate(limits):
         f   = flux_2d[:, j]
         fe  = fluxerr_2d[:, j]
-        non_detect = ~np.isfinite(f) | (f <= 0) | (f < lim)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            snr = np.abs(f / np.where(fe > 0, fe, np.nan))
+        snr_non_detect = ~np.isfinite(snr) | (snr < snr_threshold)
+        non_detect = ~np.isfinite(f) | (f <= 0) | (f < lim) | snr_non_detect
 
         # magnitude
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -128,6 +141,36 @@ def build_obs_array(flux_2d, fluxerr_2d, limits):
         obs[:, 2 * j + 1] = sig
 
     return obs
+
+
+def run_inference_at_threshold(sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, args, snr_threshold):
+    """Run posterior inference for one inference-side SNR threshold."""
+    obs = build_obs_array(flux_sel, fluxerr_sel, limits, snr_threshold=snr_threshold)
+    detection_fraction = float(np.mean(obs[:, ::2] < 99.0))
+
+    posteriors = sx._get_posterior_obs(
+        obs,
+        qphi,
+        n_samples=args.n_samples,
+        bar=True,
+        input_z=z_sel,
+        device=args.device,
+    )
+
+    logM_med = np.nanmedian(posteriors[:, :, 0], axis=1)
+    logM_lo = np.nanpercentile(posteriors[:, :, 0], 16, axis=1)
+    logM_hi = np.nanpercentile(posteriors[:, :, 0], 84, axis=1)
+    logSFR_med = np.nanmedian(posteriors[:, :, 1], axis=1)
+
+    return {
+        "obs": obs,
+        "detection_fraction": detection_fraction,
+        "posteriors": posteriors,
+        "logM_med": logM_med,
+        "logM_lo": logM_lo,
+        "logM_hi": logM_hi,
+        "logSFR_med": logSFR_med,
+    }
 
 
 # ── main ──────────────────────────────────────────────────────────────────
@@ -227,8 +270,10 @@ def main():
     # 3. Build observation array (n_gal, 2*n_filt) - correct mag+magerr
     # ------------------------------------------------------------------
     print("Building observation array...")
-    obs = build_obs_array(flux_sel, fluxerr_sel, limits)
+    obs = build_obs_array(flux_sel, fluxerr_sel, limits, snr_threshold=args.infer_snr_threshold)
     print(f"  obs shape: {obs.shape}  ({len(sel)} galaxies, {2*N_FILT} features)")
+    print(f"  inference SNR threshold: {args.infer_snr_threshold}")
+    print(f"  detection fraction (<99 mag): {np.mean(obs[:, ::2] < 99.0):.3f}")
 
     # Quick sanity: print first galaxy
     print(f"  galaxy[0] mags : {obs[0, ::2].round(2)}")
@@ -265,24 +310,65 @@ def main():
             f"Model: {sx.model_name}; expected context in this script: {obs.shape[1] + 1}."
         ) from exc
 
-    print(f"Running inference on {len(sel)} galaxies × {args.n_samples} samples (backend={args.sample_with}) ...")
-    posteriors = sx._get_posterior_obs(
-        obs,
-        qphi,
-        n_samples=args.n_samples,
-        bar=True,
-        input_z=z_sel,
-        device=args.device,
+    print(
+        f"Running inference on {len(sel)} galaxies × {args.n_samples} samples "
+        f"(backend={args.sample_with}, snr_threshold={args.infer_snr_threshold}) ..."
     )
+    baseline = run_inference_at_threshold(
+        sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, args, args.infer_snr_threshold
+    )
+    posteriors = baseline["posteriors"]
 
     # ------------------------------------------------------------------
     # 5. Extract summary statistics
     # ------------------------------------------------------------------
     # theta order for mass_sfr: [0]=logM*, [1]=logSFR
-    logM_med  = np.nanmedian(posteriors[:, :, 0], axis=1)
-    logM_lo   = np.nanpercentile(posteriors[:, :, 0], 16, axis=1)
-    logM_hi   = np.nanpercentile(posteriors[:, :, 0], 84, axis=1)
-    logSFR_med = np.nanmedian(posteriors[:, :, 1], axis=1)
+    logM_med = baseline["logM_med"]
+    logM_lo = baseline["logM_lo"]
+    logM_hi = baseline["logM_hi"]
+    logSFR_med = baseline["logSFR_med"]
+
+    # Optional no-retraining threshold sweep diagnostics
+    if len(args.snr_threshold_sweep) > 0:
+        sweep_thresholds = [float(args.infer_snr_threshold)]
+        for value in args.snr_threshold_sweep:
+            threshold = float(value)
+            if threshold not in sweep_thresholds:
+                sweep_thresholds.append(threshold)
+
+        print("\nNo-retraining SNR-threshold sweep diagnostics:")
+        print(f"  baseline threshold={args.infer_snr_threshold:.2f}")
+
+        detection_fractions = []
+        delta_logm_stack = []
+
+        for threshold in sweep_thresholds:
+            run = baseline if threshold == float(args.infer_snr_threshold) else run_inference_at_threshold(
+                sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, args, threshold
+            )
+            detection_fractions.append(run["detection_fraction"])
+
+            delta_logm = run["logM_med"] - baseline["logM_med"]
+            delta_logm_stack.append(delta_logm)
+
+            p16, p50, p84 = np.nanpercentile(delta_logm, [16, 50, 84])
+            print(
+                f"  threshold={threshold:>4.1f}: "
+                f"det_frac={run['detection_fraction']:.3f}, "
+                f"ΔlogM* median={p50:+.3f} dex "
+                f"(p16={p16:+.3f}, p84={p84:+.3f})"
+            )
+
+        sweep_file = outdir / "snr_threshold_sweep.npz"
+        np.savez(
+            sweep_file,
+            thresholds=np.asarray(sweep_thresholds, dtype=float),
+            detection_fraction=np.asarray(detection_fractions, dtype=float),
+            delta_logM=np.asarray(delta_logm_stack, dtype=float),
+            baseline_logM=baseline["logM_med"],
+            selected_indices=sel,
+        )
+        print(f"  Sweep saved to {sweep_file}")
 
     # ------------------------------------------------------------------
     # 6. Save results
