@@ -654,7 +654,18 @@ def save_validation_plots(real_data, mock_data, model, outdir):
             sigma_pred = np.interp(mgrid, centers, means)
             sigma_pred = np.maximum(sigma_pred, sigma_floor)
         else:
-            a, b, c, scatter = model.noise_sigma_mag_params[fi]
+            coeffs = np.asarray(model.noise_sigma_mag_params[fi], dtype=float).ravel()
+            if coeffs.size >= 4:
+                a, b, c, _scatter = coeffs[:4]
+            elif coeffs.size == 3:
+                a, b, c = coeffs
+            elif coeffs.size == 2:
+                a, b = coeffs
+                c = 0.0
+            else:
+                a = np.log(0.1)
+                b = 0.0
+                c = 0.0
             sigma_pred = np.exp(a + b * mgrid + c * mgrid * mgrid)
             sigma_pred = np.maximum(sigma_pred, sigma_floor)
 
