@@ -640,19 +640,23 @@ def load_or_simulate_model(model, args, outdir):
 def save_validation_plots(real_data, mock_data, model, outdir):
     """Generate and save all validation plots."""
     def plot_sigma_model_curve(fi):
-        if model.noise_sigma_mag_params is None:
+        if getattr(model, "noise_sigma_mag_params", None) is None:
             model._prepare_sigma_mag_lognormal_params()
 
         mgrid = np.linspace(20, 30, 100)
-        centers = None if model.noise_sigma_mag_interp_centers is None else model.noise_sigma_mag_interp_centers[fi]
-        means = None if model.noise_sigma_mag_interp_means is None else model.noise_sigma_mag_interp_means[fi]
+        interp_centers_all = getattr(model, "noise_sigma_mag_interp_centers", None)
+        interp_means_all = getattr(model, "noise_sigma_mag_interp_means", None)
+        sigma_floor = getattr(model, "noise_sigma_floor", 8e-3)
+
+        centers = None if interp_centers_all is None else interp_centers_all[fi]
+        means = None if interp_means_all is None else interp_means_all[fi]
         if centers is not None and means is not None and len(centers) >= 2:
             sigma_pred = np.interp(mgrid, centers, means)
-            sigma_pred = np.maximum(sigma_pred, model.noise_sigma_floor)
+            sigma_pred = np.maximum(sigma_pred, sigma_floor)
         else:
             a, b, c, scatter = model.noise_sigma_mag_params[fi]
             sigma_pred = np.exp(a + b * mgrid + c * mgrid * mgrid)
-            sigma_pred = np.maximum(sigma_pred, model.noise_sigma_floor)
+            sigma_pred = np.maximum(sigma_pred, sigma_floor)
 
         real_mag = real_data["mag"][fi]
         real_sigma = real_data["sigma"][fi]

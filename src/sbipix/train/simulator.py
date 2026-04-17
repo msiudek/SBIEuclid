@@ -68,6 +68,26 @@ def _mean_log_ssfr(logmass, zval):
     return mu_z + b_z * (float(logmass) - 10.0)
 
 
+def _sample_stellar_age_from_ssfr(target_log_ssfr, age_universe_gyr):
+    """
+    Sample stellar age (Gyr) anchored to inverse sSFR with scatter.
+
+    The baseline uses t_age ~ 1/sSFR and applies log-normal scatter,
+    clipped to a physically plausible fraction of the universe age.
+    """
+    ssfr_yr = 10 ** float(target_log_ssfr)
+    if not np.isfinite(ssfr_yr) or ssfr_yr <= 0:
+        return float(np.clip(0.3 * age_universe_gyr, 0.05, 0.9 * age_universe_gyr))
+
+    age_from_ssfr_gyr = 1.0 / ssfr_yr / 1e9
+    scatter_factor = 10 ** np.random.normal(0.0, 0.3)
+    age_sample = age_from_ssfr_gyr * scatter_factor
+
+    min_age = 0.05
+    max_age = max(0.9 * float(age_universe_gyr), min_age)
+    return float(np.clip(age_sample, min_age, max_age))
+
+
 def _enforce_target_ssfr(sfh_gyr, timeax_gyr, logmass_target, target_log_ssfr, n_iter=3):
     """
     Iteratively enforce a target log-sSFR while keeping total formed mass fixed.
@@ -213,11 +233,22 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         
         zval = _to_scalar(priors.sample_z_prior())
         massval = _to_scalar(priors.sample_mass_prior())
+        age_gyr = float(cosmology.age(zval).value)
+
+        target_log_ssfr = None
+        if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
+            mean_log_ssfr = _mean_log_ssfr(massval, zval)
+            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
+            if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
+                target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
 
         # Sample τ-delayed SFH parameters
-        age_gyr = float(cosmology.age(zval).value)
         ti_max = max(age_gyr - 1e-3, 1e-3)
-        ti = np.random.uniform(0.0, ti_max, size=1)[0]  # Time when SF began, cosmic (Gyr)
+        if target_log_ssfr is None:
+            ti = np.random.uniform(0.0, ti_max, size=1)[0]  # Time when SF began, cosmic (Gyr)
+        else:
+            stellar_age = _sample_stellar_age_from_ssfr(target_log_ssfr, age_gyr)
+            ti = float(np.clip(age_gyr - stellar_age, 0.0, ti_max))
         tau =  10**(np.random.uniform(np.log10(1e-2), np.log10(100)))  # Timescale of decrease (Gyr)
 
         # Generate SFH
@@ -226,11 +257,7 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
 
         # For sSFRlognormal in parametric mode, enforce a physically motivated
         # mass- and redshift-dependent sSFR sequence while preserving total mass.
-        if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
-            mean_log_ssfr = _mean_log_ssfr(massval, zval)
-            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
-            if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
-                target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
+        if target_log_ssfr is not None:
             sfh = _enforce_target_ssfr(sfh, timeax, massval, target_log_ssfr, n_iter=3)
 
         sfh = sfh / 1e9  # Convert M☉/Gyr -> M☉/yr for FSPS tabular SFH
