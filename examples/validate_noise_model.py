@@ -99,8 +99,8 @@ SIMULATION_CONFIG = {
     "Z_min": -0.8,
     "Z_max": 0.3,
     "dust_model": "Calzetti",
-    "dust_prior": "exp",
-    "Av_min": 0.2,
+    "dust_prior": "flat",
+    "Av_min": 0.0,
     "Av_max": 3.0,
     "tx_alpha": 0.7,
 }
@@ -639,6 +639,40 @@ def load_or_simulate_model(model, args, outdir):
 
 def save_validation_plots(real_data, mock_data, model, outdir):
     """Generate and save all validation plots."""
+    def plot_sigma_model_curve(fi):
+        if model.noise_sigma_mag_params is None:
+            model._prepare_sigma_mag_lognormal_params()
+
+        mgrid = np.linspace(20, 30, 100)
+        centers = None if model.noise_sigma_mag_interp_centers is None else model.noise_sigma_mag_interp_centers[fi]
+        means = None if model.noise_sigma_mag_interp_means is None else model.noise_sigma_mag_interp_means[fi]
+        if centers is not None and means is not None and len(centers) >= 2:
+            sigma_pred = np.interp(mgrid, centers, means)
+            sigma_pred = np.maximum(sigma_pred, model.noise_sigma_floor)
+        else:
+            a, b, c, scatter = model.noise_sigma_mag_params[fi]
+            sigma_pred = np.exp(a + b * mgrid + c * mgrid * mgrid)
+            sigma_pred = np.maximum(sigma_pred, model.noise_sigma_floor)
+
+        real_mag = real_data["mag"][fi]
+        real_sigma = real_data["sigma"][fi]
+        valid = np.isfinite(real_mag) & np.isfinite(real_sigma) & (real_sigma > 0)
+
+        plt.figure(figsize=(6, 4.5))
+        if np.any(valid):
+            plt.scatter(real_mag[valid], real_sigma[valid], alpha=0.1, s=5, label='real')
+        plt.plot(mgrid, sigma_pred, color='crimson', lw=2, label='model')
+        plt.yscale('log')
+        plt.xlabel('Magnitude')
+        plt.ylabel('Sigma (mag)')
+        plt.title(f"Sigma model curve: {FILTER_SHORT[fi]}")
+        plt.legend()
+        plt.tight_layout()
+        out = outdir / f"sigma_model_curve_{FILTER_SHORT[fi].replace('-', '_')}.png"
+        plt.savefig(out, dpi=170)
+        plt.close()
+        return out
+
     debug_flux_scale(real_data, mock_data)
     print_debug_diagnostics(real_data, mock_data)
     print_mock_plot_counts(mock_data)
@@ -703,6 +737,10 @@ def save_validation_plots(real_data, mock_data, model, outdir):
         if out:
             saved.append(out)
 
+        out = plot_sigma_model_curve(fi)
+        if out:
+            saved.append(out)
+
     print("  [per-filter above: sigma_vs_mag, mag_hist, det_fraction, sigma_dist]")
 
     out = plot_colors(
@@ -743,7 +781,7 @@ def build_parser():
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", "--skip-sim", action="store_true",
                    help="Skip simulation step; load existing atlas instead")
-    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "lognormal", "mag_lognormal"], default="empirical",
+    p.add_argument("--sigma-sampler", choices=["empirical", "truncnorm", "mag_lognormal"], default="empirical",
                    help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
     p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
@@ -827,6 +865,26 @@ def main():
         debug_mass_flux_scaling_fixed_nuisance(model, target_masses=(9.0, 10.0, 11.0))
     else:
         print("Checking luminosity scaling... skipped (theta/obs unavailable)")
+
+    # ------------------------------------------------------------------
+    # Mask: keep only galaxies bright enough to be potentially detectable.
+    # For each galaxy compute the median flux (across bands) from the
+    # noiseless atlas mags; drop those below the median 1-sigma depth.
+    # ------------------------------------------------------------------
+    obs_flux = mag_to_flux_ujy(model.obs)                     # (n_sim, n_filt)
+    median_flux = np.nanmedian(obs_flux, axis=1)              # (n_sim,)
+    _limits_arr = np.load(str(obs_dir / limits_file))
+    n_filt_used = model.obs.shape[1]
+    sigma_lim = float(np.median(_limits_arr[:n_filt_used]))   # scalar [μJy]
+    flux_mask = median_flux > sigma_lim
+    n_before = model.n_simulation
+    model.theta = model.theta[flux_mask]
+    model.obs   = model.obs[flux_mask]
+    model.n_simulation = int(flux_mask.sum())
+    print(
+        f"  sigma_lim mask (median_flux > {sigma_lim:.4f} μJy): "
+        f"{model.n_simulation} / {n_before} galaxies kept"
+    )
 
     print("[2/3] Applying observational realism...")
     model.load_obs_features()

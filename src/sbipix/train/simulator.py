@@ -48,6 +48,73 @@ def _to_scalar(value):
     return float(arr.reshape(-1)[0])
 
 
+def _ssfr_mass_slope_from_z(zval):
+    """Piecewise mass-slope term B(z) for log-sSFR relation."""
+    if zval < 1.0:
+        return -0.08
+    if zval < 2.0:
+        return -0.15
+    if zval < 3.0:
+        return -0.22
+    if zval < 4.0:
+        return -0.28
+    return -0.34
+
+
+def _mean_log_ssfr(logmass, zval):
+    """Mean log-sSFR model: μ(z) + B(z) * (logM - 10)."""
+    mu_z = -10.0 + 0.8 * np.log10(1.0 + max(float(zval), 0.0))
+    b_z = _ssfr_mass_slope_from_z(float(zval))
+    return mu_z + b_z * (float(logmass) - 10.0)
+
+
+def _enforce_target_ssfr(sfh_gyr, timeax_gyr, logmass_target, target_log_ssfr, n_iter=3):
+    """
+    Iteratively enforce a target log-sSFR while keeping total formed mass fixed.
+
+    Parameters
+    ----------
+    sfh_gyr : np.ndarray
+        SFH in Msun/Gyr.
+    timeax_gyr : np.ndarray
+        Time axis in Gyr.
+    logmass_target : float
+        Target log10 formed stellar mass used to renormalize SFH integral.
+    target_log_ssfr : float
+        Target log10(sSFR/yr^-1).
+    n_iter : int
+        Number of correction iterations.
+    """
+    sfh = np.asarray(sfh_gyr, dtype=float).copy()
+    timeax = np.asarray(timeax_gyr, dtype=float)
+    if sfh.size == 0 or timeax.size == 0:
+        return sfh
+
+    recent_mask = timeax >= (np.max(timeax) - 0.1)  # last 100 Myr window
+    if not np.any(recent_mask):
+        recent_mask[-1] = True
+
+    target_mass = 10 ** float(logmass_target)
+    dt = np.gradient(timeax)
+
+    for _ in range(max(int(n_iter), 1)):
+        recent_sfr_yr = np.mean(sfh[recent_mask]) / 1e9
+        if (not np.isfinite(recent_sfr_yr)) or (recent_sfr_yr <= 0):
+            break
+
+        current_log_ssfr = np.log10(recent_sfr_yr) - float(logmass_target)
+        delta = float(target_log_ssfr) - current_log_ssfr
+
+        scale_recent = np.clip(10 ** delta, 0.1, 10.0)
+        sfh[recent_mask] *= scale_recent
+
+        current_mass = np.sum(sfh * dt)
+        if np.isfinite(current_mass) and current_mass > 0:
+            sfh *= (target_mass / current_mass)
+
+    return sfh
+
+
 def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True, 
                              filter_list='filter_list.dat', filt_dir='filters/', 
                              norm_method='median', z_step=0.01, sp=None, 
@@ -155,8 +222,18 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
 
         # Generate SFH
         t = np.linspace(0, cosmology.age(zval).value, 1000)
-        sfh, timeax = sfh_delayed_exponential(t, massval, tau, ti)
-        sfh = sfh / 1e9  # Convert M☉/Gyr -> M☉/yr
+        sfh, timeax = sfh_delayed_exponential(t, massval, tau, ti)  # Msun/Gyr
+
+        # For sSFRlognormal in parametric mode, enforce a physically motivated
+        # mass- and redshift-dependent sSFR sequence while preserving total mass.
+        if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
+            mean_log_ssfr = _mean_log_ssfr(massval, zval)
+            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
+            if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
+                target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
+            sfh = _enforce_target_ssfr(sfh, timeax, massval, target_log_ssfr, n_iter=3)
+
+        sfh = sfh / 1e9  # Convert M☉/Gyr -> M☉/yr for FSPS tabular SFH
 
         # Sample other parameters
         dust = _to_scalar(priors.sample_Av_prior())
