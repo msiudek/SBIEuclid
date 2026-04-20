@@ -31,8 +31,8 @@ ROOT       = Path(__file__).resolve().parents[1]
 OBS_DIR    = ROOT / "obs" / "obs_properties"
 LIB_DIR    = ROOT / "library"
 CATALOG    = ROOT / "obs" / "obs_properties" / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"
-MODEL_NAME   = "model_euclid_v1.3.pkl"
-ATLAS_NAME   = "atlas_obs_euclid_north_validate"
+MODEL_NAME   = "model_euclid_v1.5_mass_sfr_zcond.pkl"
+ATLAS_NAME   = "atlas_obs_euclid_north_validate_100000_Nparam_2.dbatlas"
 
 # Filter order from filters_to_use.dat (must match training order)
 FILTER_STEMS = [
