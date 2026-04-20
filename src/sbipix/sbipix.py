@@ -14,6 +14,7 @@ import seaborn as sns
 import sklearn.metrics as sm
 from scipy import stats
 from scipy.stats import truncnorm
+from scipy.interpolate import interp1d
 from tqdm import tqdm, trange
 from astropy.io import fits
 from astropy.cosmology import FlatLambdaCDM
@@ -22,6 +23,11 @@ from .utils.sed_utils import mag_conversion
 from .utils.cosmology import setup_cosmology
 from .train.simulator import generate_atlas_parametric
 from .plotting.diagnostics import plot_test_performance
+
+
+DEBUG_SIGMA_ONLY = os.getenv("SBIPIX_DEBUG_SIGMA_ONLY", "0") == "1"
+DEBUG_NOISE_ONLY = os.getenv("SBIPIX_DEBUG_NOISE_ONLY", "0") == "1"
+DEBUG_MASK_DIAGNOSTICS = os.getenv("SBIPIX_DEBUG_MASK_DIAGNOSTICS", "0") == "1"
 
 
 class sbipix():
@@ -168,6 +174,14 @@ class sbipix():
         self.noise_detection_model = 'hard'
         self.noise_sigma_mag_params = None
         self.noise_sigma_mag_ranges = None
+        self.noise_sigma_mag_interp_centers = None
+        self.noise_sigma_mag_interp_means = None
+        self.noise_sigma_mag_interp_stds = None
+        # Valid domain per filter — only interpolate within this range
+        self.noise_sigma_mag_valid_min = None   # (n_filters,) faintest trained bin center
+        self.noise_sigma_mag_valid_max = None   # (n_filters,) brightest trained bin center
+        self.noise_sigma_flux_alpha = None
+        self.noise_sigma_floor = 8e-3
         self.noise_sigma_mag_min = 1e-6
         self.noise_sigma_mag_max = 10.0
         
@@ -314,41 +328,40 @@ class sbipix():
         pixel_means = np.maximum(np.asarray(pixel_means, dtype=float), 1e-6)
         pixel_stds = np.maximum(np.asarray(pixel_stds, dtype=float), 1e-6)
 
-        if self.noise_sigma_sampler == 'lognormal':
-            sigma2 = np.log1p((pixel_stds / pixel_means) ** 2)
-            mu = np.log(pixel_means) - 0.5 * sigma2
-            mag_errs_det = np.random.lognormal(mean=mu, sigma=np.sqrt(sigma2))
-        else:
-            a_std = (0.0 - pixel_means) / pixel_stds
-            mag_errs_det = truncnorm.rvs(
-                a=a_std,
-                b=np.inf,
-                loc=pixel_means,
-                scale=pixel_stds
-            )
+        # Keep a single legacy fallback sampler here (truncated normal).
+        # The dedicated 'mag_lognormal' sampler is handled explicitly in
+        # _add_noise_nan_limit via _sample_sigma_mag_lognormal().
+        a_std = (0.0 - pixel_means) / pixel_stds
+        mag_errs_det = truncnorm.rvs(
+            a=a_std,
+            b=np.inf,
+            loc=pixel_means,
+            scale=pixel_stds
+        )
 
         return mag_errs_det
 
     def _fit_sigma_mag_lognormal_params(self, filter_idx):
-        """Fit log(sigma) = a + b*mag and scatter for one filter."""
+        """Fit log(sigma) = a + b*mag + c*mag^2 and scatter for one filter."""
         centers, means_f = self._compute_bin_centers(filter_idx)
         means_f = np.asarray(means_f, dtype=float)
         stds_f = np.asarray(self.stds_sigma_obs[filter_idx], dtype=float)
 
         valid = np.isfinite(centers) & np.isfinite(means_f) & (means_f > 0)
-        if np.sum(valid) < 2:
+        if np.sum(valid) < 3:
             mean_fallback = np.nanmedian(means_f[np.isfinite(means_f) & (means_f > 0)])
             if not np.isfinite(mean_fallback) or mean_fallback <= 0:
                 mean_fallback = 0.1
             a = np.log(mean_fallback)
             b = 0.0
+            c = 0.0
             scatter = 0.3
-            return np.array([a, b, scatter], dtype=float)
+            return np.array([a, b, c, scatter], dtype=float)
 
         x = centers[valid]
         y = np.log(means_f[valid])
-        b, a = np.polyfit(x, y, 1)
-        resid = y - (a + b * x)
+        c, b, a = np.polyfit(x, y, 2)
+        resid = y - (a + b * x + c * x * x)
         scatter_fit = np.nanstd(resid)
 
         stds_pos = np.isfinite(stds_f[valid]) & (stds_f[valid] > 0)
@@ -366,13 +379,16 @@ class sbipix():
             scatter = float(np.nanmax(candidate))
         scatter = max(scatter, 1e-3)
 
-        return np.array([a, b, scatter], dtype=float)
+        return np.array([a, b, c, scatter], dtype=float)
 
     def _prepare_sigma_mag_lognormal_params(self):
-        """Prepare per-filter [a, b, scatter] for mag-conditioned lognormal sigma."""
+        """Prepare per-filter [a, b, c, scatter] and interpolation curves (mean + std) for sigma(mag)."""
         n_filters = self.mean_sigma_obs.shape[0]
-        params = np.zeros((n_filters, 3), dtype=float)
+        params = np.zeros((n_filters, 4), dtype=float)
         ranges = np.zeros((n_filters, 2), dtype=float)
+        interp_centers = np.empty(n_filters, dtype=object)
+        interp_means = np.empty(n_filters, dtype=object)
+        interp_stds = np.empty(n_filters, dtype=object)  # Store stds directly, not scatter
         for filter_idx in range(n_filters):
             centers, _ = self._compute_bin_centers(filter_idx)
             finite_centers = np.asarray(centers, dtype=float)
@@ -384,24 +400,140 @@ class sbipix():
                     float(np.nanmin(finite_centers)),
                     float(np.nanmax(finite_centers)),
                 ], dtype=float)
+
+            means_f = np.asarray(self.mean_sigma_obs[filter_idx], dtype=float)
+            stds_f = np.asarray(self.stds_sigma_obs[filter_idx], dtype=float)
+            valid_interp = (
+                np.isfinite(centers)
+                & np.isfinite(means_f)
+                & np.isfinite(stds_f)
+                & (means_f > 0)
+            )
+            if np.any(valid_interp):
+                x = np.asarray(centers[valid_interp], dtype=float)
+                y_mean = np.asarray(means_f[valid_interp], dtype=float)
+                y_std = np.asarray(stds_f[valid_interp], dtype=float)
+                # Cap std/mean ratio to prevent wild extrapolation while
+                # preserving broader per-bin scatter seen in real data.
+                ratio_capped = np.minimum(y_std / np.maximum(y_mean, 1e-12), 0.8)
+                y_std = ratio_capped * y_mean
+                order = np.argsort(x)
+                x = x[order]
+                y_mean = y_mean[order]
+                y_std = y_std[order]
+                x_unique, idx_unique = np.unique(x, return_index=True)
+                y_mean_unique = y_mean[idx_unique]
+                y_std_unique = y_std[idx_unique]
+                interp_centers[filter_idx] = x_unique
+                interp_means[filter_idx] = y_mean_unique
+                interp_stds[filter_idx] = np.maximum(y_std_unique, 1e-4)  # Non-zero stds
+            else:
+                interp_centers[filter_idx] = np.array([], dtype=float)
+                interp_means[filter_idx] = np.array([], dtype=float)
+                interp_stds[filter_idx] = np.array([], dtype=float)
+
             params[filter_idx] = self._fit_sigma_mag_lognormal_params(filter_idx)
         self.noise_sigma_mag_params = params
         self.noise_sigma_mag_ranges = ranges
+        self.noise_sigma_mag_interp_centers = interp_centers
+        self.noise_sigma_mag_interp_means = interp_means
+        self.noise_sigma_mag_interp_stds = interp_stds
+        # Store the actual training domain bounds (faint & bright limits of observed bins)
+        valid_min = np.full(n_filters, np.nan)
+        valid_max = np.full(n_filters, np.nan)
+        for filter_idx in range(n_filters):
+            c = interp_centers[filter_idx]
+            if c is not None and len(c) >= 2:
+                valid_min[filter_idx] = float(np.nanmin(c))
+                valid_max[filter_idx] = float(np.nanmax(c))
+        self.noise_sigma_mag_valid_min = valid_min
+        self.noise_sigma_mag_valid_max = valid_max
+
+    def _fit_sigma_flux_alpha(self, filter_idx):
+        """Estimate source-noise coefficient alpha from empirical sigma-vs-mag trends."""
+        centers, means_f = self._compute_bin_centers(filter_idx)
+        centers = np.asarray(centers, dtype=float)
+        means_f = np.asarray(means_f, dtype=float)
+
+        flux_centers = np.asarray(mag_conversion(centers, convert_to='flux'), dtype=float)
+        sigma_flux_emp = (np.log(10) / 2.5) * flux_centers * np.abs(means_f)
+        sigma_bkg = float(self.limits[filter_idx])
+
+        sigma_src2 = sigma_flux_emp ** 2 - sigma_bkg ** 2
+        valid = (
+            np.isfinite(flux_centers) & (flux_centers > 0)
+            & np.isfinite(sigma_src2) & (sigma_src2 > 0)
+            & (flux_centers > 3.0 * sigma_bkg)
+        )
+
+        if not np.any(valid):
+            valid = (
+                np.isfinite(flux_centers) & (flux_centers > 0)
+                & np.isfinite(sigma_src2) & (sigma_src2 > 0)
+            )
+        if not np.any(valid):
+            return 0.0
+
+        alpha_vals = np.sqrt(sigma_src2[valid]) / np.sqrt(flux_centers[valid])
+        alpha_vals = alpha_vals[np.isfinite(alpha_vals) & (alpha_vals >= 0)]
+        if alpha_vals.size == 0:
+            return 0.0
+        return float(np.nanmedian(alpha_vals))
+
+    def _prepare_sigma_flux_alpha(self):
+        """Prepare per-filter alpha values for sigma_flux^2 = sigma_bkg^2 + alpha^2 flux."""
+        n_filters = self.mean_sigma_obs.shape[0]
+        alpha = np.zeros(n_filters, dtype=float)
+        for filter_idx in range(n_filters):
+            alpha[filter_idx] = self._fit_sigma_flux_alpha(filter_idx)
+        self.noise_sigma_flux_alpha = alpha
 
     def _sample_sigma_mag_lognormal(self, mags_det, filter_idx):
-        """Sample sigma from exp(N(a + b*mag, scatter)) for one filter."""
+        """Sample sigma with safe lognormal parameterization using interpolated mean and std.
+        
+        Step 1: mean_sigma = interpolate(mag)
+        Step 2: std_sigma = interpolate(mag) [with std/mean <= 0.5]
+        Step 3: sigma_mag ~ lognormal(mu, sigma) where:
+                  sigma2 = log1p((std/mean)^2)
+                  mu = log(mean) - 0.5*sigma2
+        Step 4: floor to noise_sigma_floor
+        """
         if self.noise_sigma_mag_params is None:
             self._prepare_sigma_mag_lognormal_params()
 
-        a, b, scatter = self.noise_sigma_mag_params[filter_idx]
-        #scatter *= 0.7
+        a, b, c, scatter = self.noise_sigma_mag_params[filter_idx]
         mags_det = np.asarray(mags_det, dtype=float)
-        if self.noise_sigma_mag_ranges is None:
-            self._prepare_sigma_mag_lognormal_params()
-        mag_min_fit, mag_max_fit = self.noise_sigma_mag_ranges[filter_idx]
-        mags_det = np.clip(mags_det, mag_min_fit, mag_max_fit)
-        mu = a + b * mags_det
-        mag_errs_det = np.random.lognormal(mean=mu, sigma=scatter)
+
+        centers = None if self.noise_sigma_mag_interp_centers is None else self.noise_sigma_mag_interp_centers[filter_idx]
+        means = None if self.noise_sigma_mag_interp_means is None else self.noise_sigma_mag_interp_means[filter_idx]
+        stds = None if self.noise_sigma_mag_interp_stds is None else self.noise_sigma_mag_interp_stds[filter_idx]
+
+        # NOTE: caller is responsible for only passing mags within the valid training domain.
+        # No clipping/extrapolation here — out-of-domain mags must be handled upstream.
+
+        # Use interpolation-based parameterization if available
+        if centers is not None and means is not None and stds is not None and len(centers) >= 2:
+            # Interpolate within the trained range (np.interp clamps at boundary — safe for
+            # in-domain mags; out-of-domain mags should not reach here)
+            mean_sigma = np.interp(mags_det, centers, means)
+            std_sigma = np.interp(mags_det, centers, stds)
+            # Ensure std/mean is capped
+            std_sigma = np.minimum(std_sigma, 0.5 * mean_sigma)
+            std_sigma = np.maximum(std_sigma, 1e-4)
+
+            # Safe lognormal parameterization: E[X]=mean, Var[X]=std^2
+            ratio = std_sigma / np.maximum(mean_sigma, 1e-12)
+            sigma2 = np.log1p(ratio ** 2)
+            mu = np.log(np.maximum(mean_sigma, 1e-12)) - 0.5 * sigma2
+            sigma_param = np.sqrt(np.maximum(sigma2, 1e-6))
+            mag_errs_det = np.random.lognormal(mean=mu, sigma=sigma_param)
+        else:
+            # Fallback to quadratic parameterization
+            mu = a + b * mags_det + c * mags_det * mags_det
+            mag_errs_det = np.random.lognormal(mean=mu, sigma=scatter)
+
+        # Floor
+        mag_errs_det = np.maximum(mag_errs_det, self.noise_sigma_floor)
         mag_errs_det = np.clip(mag_errs_det, self.noise_sigma_mag_min, self.noise_sigma_mag_max)
 
         return mag_errs_det
@@ -591,6 +723,30 @@ class sbipix():
             if arr.ndim == 1:
                 return arr
             return arr[:, 0]
+
+        def _to_log10_if_linear(arr):
+            arr = _as_1d(arr).astype(float)
+            finite = arr[np.isfinite(arr)]
+            if finite.size == 0:
+                return arr
+            # If values include non-positive entries, treat as already log10.
+            # Physical linear M* and SFR must be > 0.
+            if np.nanmin(finite) <= 0:
+                return arr
+            return np.log10(np.clip(arr, 1e-300, None))
+
+        def _to_log10_mstar(arr):
+            arr = _as_1d(arr).astype(float)
+            finite = arr[np.isfinite(arr)]
+            if finite.size == 0:
+                return arr
+            if np.nanmin(finite) <= 0:
+                return arr
+            # Stellar masses already in log10(Msun) are typically O(1e1),
+            # while linear masses are O(1e6-1e12) Msun.
+            if np.nanpercentile(finite, 99) < 100.0:
+                return arr
+            return np.log10(np.clip(arr, 1e-300, None))
         
         # Apply filter removal if specified
         if self.remove_filters is not None:
@@ -605,10 +761,13 @@ class sbipix():
         if self.parametric:
             sfhs = atlas['sfh_tuple']
             theta = np.zeros((n_loaded, 8))
-            theta[:, 0] = sfhs[:, 0]  # M* (surviving)
-            theta[:, 1] = sfhs[:, 1]  # M* (formed)
-            theta[:, 2] = sfhs[:, 2]  # SFR
-            theta[:, 3] = sfhs[:, 3]  # τ
+            # Build key physical parameters explicitly from atlas keys.
+            # Convert to log10 only when arrays are in linear units.
+            theta[:, 0] = _to_log10_mstar(atlas['mstar'])  # log M* (surviving)
+            theta[:, 2] = _to_log10_if_linear(atlas['sfr'])    # log SFR
+            # Keep formed-mass, tau and ti from sfh tuple in dense_basis atlas.
+            theta[:, 1] = sfhs[:, 1]  # log M* (formed)
+            theta[:, 3] = np.clip(sfhs[:, 3], 0.1, 5.0)   # τ [Gyr], clipped to [0.1,5]
             theta[:, 4] = sfhs[:, 4]  # t_i
             theta[:, 5] = _as_1d(atlas['met'])  # [M/H]
             theta[:, 6] = _as_1d(atlas['dust'])  # A_V
@@ -626,8 +785,8 @@ class sbipix():
             theta = np.zeros((n_loaded, 8))
             sfhs = atlas['sfh_tuple_rec']
             sfhs = np.reshape(sfhs, (n_loaded, 6))
-            theta[:, 0] = sfhs[:, 0]  # M* (surviving)
-            theta[:, 1] = sfhs[:, 1]  # SFR
+            theta[:, 0] = _to_log10_mstar(atlas['mstar'])  # log M* (surviving)
+            theta[:, 1] = _to_log10_if_linear(atlas['sfr'])    # log SFR
             theta[:, 2] = sfhs[:, 3]  # t_25%
             theta[:, 3] = sfhs[:, 4]  # t_50%
             theta[:, 4] = sfhs[:, 5]  # t_75%
@@ -637,12 +796,81 @@ class sbipix():
 
             # Add formed stellar mass if requested
             if self.both_masses:
-                theta = np.concatenate((atlas['mstar'].reshape(-1,1), theta), axis=1)
+                theta = np.concatenate((_to_log10_mstar(atlas['mstar']).reshape(-1,1), theta), axis=1)
 
         self.obs = obs
         self.theta = theta
 
-        return obs, theta
+        # Apply a physical validity mask to remove clearly unphysical atlas entries
+        logM = _to_log10_mstar(atlas['mstar'])
+        logSFR = _to_log10_if_linear(atlas['sfr'])
+        z = _as_1d(atlas['zval'])
+
+        # Mag sanity: 15 < median_mag < 35 (removes pathological SEDs)
+        median_mag_per_gal = np.nanmedian(obs, axis=1)  # obs already in AB mag
+        mag_sane = (median_mag_per_gal > 15.0) & (median_mag_per_gal < 35.0)
+
+        # t_i < age of the universe at z (cosmological causality)
+        try:
+            from astropy.cosmology import FlatLambdaCDM as _FlatLCDM
+            _cosmo = _FlatLCDM(H0=70, Om0=0.3)
+            z_safe = np.clip(z, 0.01, 20.0)
+            age_at_z = np.asarray(_cosmo.age(z_safe).value, dtype=float)  # Gyr
+            if self.parametric:
+                t_i_col = self.theta[:, 4]
+            else:
+                t_i_col = np.zeros(len(self.theta))   # Dirichlet: no t_i column
+            ti_ok = np.isfinite(t_i_col) & (t_i_col < age_at_z) & (t_i_col > 0)
+        except Exception:
+            ti_ok = np.ones(n_loaded, dtype=bool)   # skip if astropy unavailable
+
+        logm_ok = (np.isfinite(logM) & (logM > 5) & (logM < 13)).ravel()
+        logsfr_ok = (np.isfinite(logSFR) & (logSFR > -15) & (logSFR < 5)).ravel()
+        z_ok = np.isfinite(z).ravel()
+        mag_sane = np.asarray(mag_sane, dtype=bool).ravel()
+        ti_ok = np.asarray(ti_ok, dtype=bool).ravel()
+
+        if not (
+            logm_ok.size == logsfr_ok.size == z_ok.size == mag_sane.size == ti_ok.size == n_loaded
+        ):
+            raise ValueError(
+                "Mask shape mismatch in physical validity filters: "
+                f"logm_ok={logm_ok.shape}, logsfr_ok={logsfr_ok.shape}, "
+                f"z_ok={z_ok.shape}, mag_sane={mag_sane.shape}, "
+                f"ti_ok={ti_ok.shape}, expected N={n_loaded}"
+            )
+
+        combined = logm_ok & logsfr_ok
+        if DEBUG_MASK_DIAGNOSTICS:
+            # Step-by-step diagnostics to identify over-constrained mask intersections
+            print(f"N total: {n_loaded}")
+            print(f"logm_ok: {np.sum(logm_ok)}")
+            print(f"logsfr_ok: {np.sum(logsfr_ok)}")
+            print(f"z_ok: {np.sum(z_ok)}")
+            print(f"mag_sane: {np.sum(mag_sane)}")
+            print(f"ti_ok: {np.sum(ti_ok)}")
+            print(f"logm_ok & logsfr_ok: {np.sum(combined)}")
+        combined = combined & z_ok
+        if DEBUG_MASK_DIAGNOSTICS:
+            print(f"(logm_ok & logsfr_ok) & z_ok: {np.sum(combined)}")
+        combined = combined & mag_sane
+        if DEBUG_MASK_DIAGNOSTICS:
+            print(f"... & mag_sane: {np.sum(combined)}")
+        combined = combined & ti_ok
+        if DEBUG_MASK_DIAGNOSTICS:
+            print(f"final combined: {np.sum(combined)}")
+
+        valid = combined
+
+        self.theta = self.theta[valid]
+        self.obs = self.obs[valid]
+        self.n_simulation = int(np.sum(valid))
+        print(
+            f"Physical mask applied: remaining {len(self.theta)} / {len(valid)}  "
+            f"(mag_sane={mag_sane.sum()}, ti_ok={ti_ok.sum()}, combined={valid.sum()})"
+        )
+
+        return self.obs, self.theta
     
     def load_obs_features(self):
         """
@@ -693,6 +921,7 @@ class sbipix():
             self.limits = self.limits[keep]
 
         self._prepare_sigma_mag_lognormal_params()
+        self._prepare_sigma_flux_alpha()
 
         print('Observational features loaded')        
 
@@ -787,6 +1016,13 @@ class sbipix():
         """
         n_sims, n_filts = self.obs.shape
         self.mag = np.zeros((n_sims, n_filts, 2))
+        if DEBUG_NOISE_ONLY and not DEBUG_SIGMA_ONLY:
+            self._debug_noise_pulls = []
+
+        if DEBUG_SIGMA_ONLY:
+            print('DEBUG_SIGMA_ONLY=True: flux noise and detection cuts are bypassed')
+        elif DEBUG_NOISE_ONLY:
+            print('DEBUG_NOISE_ONLY=True: flux noise ON, detection cuts bypassed')
         
         # We loop over FILTERS instead of GALAXIES. 
         # This allows us to process all simulations instantly using numpy arrays.
@@ -801,6 +1037,23 @@ class sbipix():
             # Store results
             self.mag[:, i, 0] = mag_n_noise
             self.mag[:, i, 1] = mag_err
+
+        if DEBUG_NOISE_ONLY and not DEBUG_SIGMA_ONLY:
+            pull_chunks = getattr(self, "_debug_noise_pulls", None)
+            if pull_chunks:
+                pull_all = np.concatenate(pull_chunks)
+                pull_all = pull_all[np.isfinite(pull_all)]
+                if pull_all.size > 0:
+                    p16, p50, p84 = np.percentile(pull_all, [16, 50, 84])
+                    frac1 = np.mean(np.abs(pull_all) <= 1.0)
+                    frac2 = np.mean(np.abs(pull_all) <= 2.0)
+                    print(
+                        "[noise-only global] "
+                        f"pull_mean={np.mean(pull_all):.3f} pull_std={np.std(pull_all):.3f} "
+                        f"p16={p16:.3f} p50={p50:.3f} p84={p84:.3f} "
+                        f"|pull|<=1: {100*frac1:.1f}% |pull|<=2: {100*frac2:.1f}% "
+                        f"N={pull_all.size}"
+                    )
 
     def _add_noise_nan_limit_mag_space(self, mag_array, filter_idx):
         """
@@ -920,11 +1173,59 @@ class sbipix():
         bin_indices = np.digitize(mags, self.percentiles[:, filter_idx]) - 1
         bin_indices = np.clip(bin_indices, 0, n_bins - 1)
 
-        # sample σ_mag from empirical or parametric distribution
+        # sample σ_mag from configured distribution
         use_empirical_sigma = (
             self.noise_sigma_sampler == 'empirical' and self.sigma_samples_obs is not None
         )
-        if use_empirical_sigma:
+        use_mag_lognormal = self.noise_sigma_sampler == 'mag_lognormal'
+
+        if use_mag_lognormal:
+            # ----------------------------------------------------------------
+            # Domain-split: only apply the trained σ(mag) model inside the
+            # bin range seen in real detected data.  For galaxies fainter than
+            # the training edge (or brighter, but that never happens) the
+            # noise is purely background-limited: σ_mag → σ_lim.
+            # ----------------------------------------------------------------
+            if self.noise_sigma_mag_valid_min is None:
+                self._prepare_sigma_mag_lognormal_params()
+
+            valid_min = float(self.noise_sigma_mag_valid_min[filter_idx])
+            valid_max = float(self.noise_sigma_mag_valid_max[filter_idx])
+            if not np.isfinite(valid_min):
+                valid_min = -np.inf
+            if not np.isfinite(valid_max):
+                valid_max = np.inf
+
+            in_domain = (mags >= valid_min) & (mags <= valid_max)
+
+            sigma_mag = np.full_like(mags, np.nan, dtype=float)
+
+            # In-domain: use fitted σ(mag) model
+            if np.any(in_domain):
+                sigma_mag[in_domain] = self._sample_sigma_mag_lognormal(
+                    mags[in_domain], filter_idx
+                )
+
+            # Out-of-domain (faint/below-limit): background-noise-limited
+            # σ_flux = σ_lim  →  σ_mag = (2.5/ln10) * σ_lim / |flux|
+            if np.any(~in_domain):
+                flux_faint = np.maximum(np.abs(flux_true[~in_domain]), 1e-12)
+                sigma_mag_faint = (2.5 / np.log(10)) * sigma_lim / flux_faint
+                # Cap at a sensible maximum to avoid infinite mag errors
+                sigma_mag_faint = np.clip(sigma_mag_faint, self.noise_sigma_floor, self.noise_sigma_mag_max)
+                sigma_mag[~in_domain] = sigma_mag_faint
+
+            # Debug: print σ_mag percentiles once per call to spot rogue values
+            p50, p90, p99, p999 = np.nanpercentile(sigma_mag, [50, 90, 99, 99.9])
+            if p999 > 1.0:
+                print(
+                    f"[σ-debug filter={filter_idx}] p50={p50:.4f} p90={p90:.4f} "
+                    f"p99={p99:.4f} p99.9={p999:.4f}  "
+                    f"in_domain={in_domain.sum()}/{len(in_domain)}"
+                )
+
+            sigma_mag = np.asarray(sigma_mag, dtype=float)
+        elif use_empirical_sigma:
             sigma_mag = np.zeros_like(mags)
             for i in range(len(mags)):
                 samples = self.sigma_samples_obs[filter_idx, bin_indices[i]]
@@ -938,36 +1239,75 @@ class sbipix():
             std  = self.stds_sigma_obs[filter_idx, bin_indices]
             sigma_mag = np.random.normal(mean, std)
 
-        # --- convert σ_mag → σ_flux properly ---
-        # use local linearization around TRUE flux
-        sigma_flux = (np.log(10) / 2.5) * flux_true * np.abs(sigma_mag)
+        # Convert sigma_mag -> sigma_flux and use THIS as the only sigma model.
+        sigma_mag = np.asarray(sigma_mag, dtype=float)
+        bad_sigma = ~np.isfinite(sigma_mag) | (sigma_mag <= 0)
+        if np.any(bad_sigma):
+            sigma_mag[bad_sigma] = self.mean_sigma_obs[filter_idx, bin_indices[bad_sigma]]
+        sigma_mag = np.maximum(sigma_mag, self.noise_sigma_floor)
+        sigma_mag = np.clip(sigma_mag, self.noise_sigma_mag_min, self.noise_sigma_mag_max)
+        sigma_flux = (np.log(10) / 2.5) * np.maximum(np.abs(flux_true), 1e-12) * sigma_mag
+        # Floor at the background 1σ limit (σ_lim) so that faint galaxies
+        # (flux ≪ σ_lim) are noise-dominated and can fall below the SNR
+        # threshold → realistic detection curve that drops to ~0 at faint end.
+        sigma_flux = np.maximum(sigma_flux, np.maximum(sigma_lim, 1e-12))
 
-        # enforce minimum background noise
-        sigma_flux = np.maximum(sigma_flux, sigma_lim)
+        # --- ADD NOISE IN FLUX SPACE ---
+        if DEBUG_SIGMA_ONLY:
+            flux_obs_raw = flux_true
+        else:
+            flux_obs_raw = flux_true + np.random.normal(0, sigma_flux)
 
-        # --- ADD NOISE IN FLUX SPACE (CRITICAL FIX) ---
-        flux_obs = flux_true + np.random.normal(0, sigma_flux)
+        # --- detection using SNR on raw (possibly negative) flux ---
+        # Apply detection BEFORE any mag conversion; negative flux = non-detection.
+        snr = flux_obs_raw / np.maximum(sigma_flux, 1e-12)
+        if DEBUG_SIGMA_ONLY or DEBUG_NOISE_ONLY:
+            detected = np.ones_like(flux_true, dtype=bool)
+        else:
+            snr_threshold = getattr(self, 'snr_threshold', 1.0)
+            detected = snr >= snr_threshold
 
-        # --- detection using SNR (CRITICAL FIX) ---
-        snr_threshold = getattr(self, 'snr_threshold', 1.0)
-        snr = flux_obs / np.maximum(sigma_flux, 1e-12)
-        detected = snr >= snr_threshold
+        if DEBUG_NOISE_ONLY and not DEBUG_SIGMA_ONLY:
+            pull = (flux_obs_raw - flux_true) / np.maximum(sigma_flux, 1e-12)
+            pull_ok = np.isfinite(pull)
+            if np.any(pull_ok):
+                pull_vals = pull[pull_ok]
+                if hasattr(self, "_debug_noise_pulls"):
+                    self._debug_noise_pulls.append(pull_vals)
+                p16, p50, p84 = np.percentile(pull_vals, [16, 50, 84])
+                frac1 = np.mean(np.abs(pull_vals) <= 1.0)
+                frac2 = np.mean(np.abs(pull_vals) <= 2.0)
+                print(
+                    f"[noise-only filter={filter_idx}] pull_mean={np.mean(pull_vals):.3f} "
+                    f"pull_std={np.std(pull_vals):.3f} p16={p16:.3f} p50={p50:.3f} p84={p84:.3f} "
+                    f"|pull|<=1: {100*frac1:.1f}% |pull|<=2: {100*frac2:.1f}%"
+                )
 
-        # --- convert to mag ---
-        mag_obs = mag_conversion(flux_obs, convert_to='mag')
+        # --- convert to mag ONLY for detected, positive-flux galaxies ---
+        # Do NOT clip negative fluxes to 1e-12 — that would invent bright mags.
+        det_pos = detected & (flux_obs_raw > 0)
+        mag_obs = np.full_like(mag_array, np.nan)
+        mag_obs[det_pos] = mag_conversion(flux_obs_raw[det_pos], convert_to='mag')
+
+        # Debug: SNR distribution for diagnosed bands
+        snr_med = float(np.nanmedian(snr))
+        snr_p99 = float(np.nanpercentile(snr, 99))
+        det_frac = float(det_pos.sum()) / max(len(flux_obs_raw), 1)
+        if det_frac < 0.3 or det_frac > 0.99:
+            print(
+                f"[det-debug filter={filter_idx}] SNR_med={snr_med:.3f} SNR_p99={snr_p99:.2f} "
+                f"det_pos={det_pos.sum()}/{len(flux_obs_raw)} ({100*det_frac:.1f}%)"
+            )
 
         # --- outputs ---
         final_mag = np.full_like(mag_array, 99.0)
         final_err = np.full_like(mag_array, mag_conversion(sigma_lim, convert_to='mag'))
 
-        det_idx = detected & np.isfinite(mag_obs)
+        valid_det = det_pos & np.isfinite(mag_obs)
+        final_mag[valid_det] = mag_obs[valid_det]
 
-        final_mag[det_idx] = mag_obs[det_idx]
-
-        # convert σ_flux → σ_mag for storage
-        final_err[det_idx] = (2.5 / np.log(10)) * sigma_flux[det_idx] / np.maximum(
-            np.abs(flux_obs[det_idx]), 1e-12
-        )
+        # convert σ_flux → σ_mag for storage (use actual observed flux for conversion)
+        final_err[valid_det] = (2.5 / np.log(10)) * sigma_flux[valid_det] / flux_obs_raw[valid_det]
 
         return final_mag, final_err
 

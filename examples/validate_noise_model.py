@@ -882,24 +882,28 @@ def main():
         print("Checking luminosity scaling... skipped (theta/obs unavailable)")
 
     # ------------------------------------------------------------------
-    # Mask: keep only galaxies bright enough to be potentially detectable.
-    # For each galaxy compute the median flux (across bands) from the
-    # noiseless atlas mags; drop those below the median 1-sigma depth.
+    # Mask: keep galaxies that are potentially detectable in at least one
+    # band, using each band's own 1-sigma depth limit.
     # ------------------------------------------------------------------
     obs_flux = mag_to_flux_ujy(model.obs)                     # (n_sim, n_filt)
-    median_flux = np.nanmedian(obs_flux, axis=1)              # (n_sim,)
     _limits_arr = np.load(str(obs_dir / limits_file))
     n_filt_used = model.obs.shape[1]
-    sigma_lim = float(np.median(_limits_arr[:n_filt_used]))   # scalar [μJy]
-    flux_mask = median_flux > sigma_lim
+    sigma_lim_per_filter = np.asarray(_limits_arr[:n_filt_used], dtype=float)  # (n_filt,)
+    bright_in_band = obs_flux > sigma_lim_per_filter[None, :]
+    flux_mask = np.any(bright_in_band, axis=1)
     n_before = model.n_simulation
     model.theta = model.theta[flux_mask]
     model.obs   = model.obs[flux_mask]
     model.n_simulation = int(flux_mask.sum())
+    n_kept_per_filter = np.sum(bright_in_band, axis=0)
+    lim_txt = ", ".join(f"{x:.4f}" for x in sigma_lim_per_filter)
+    kept_txt = ", ".join(str(int(x)) for x in n_kept_per_filter)
     print(
-        f"  sigma_lim mask (median_flux > {sigma_lim:.4f} μJy): "
+        f"  sigma_lim mask (any band flux > per-filter sigma_lim): "
         f"{model.n_simulation} / {n_before} galaxies kept"
     )
+    print(f"  per-filter sigma_lim [μJy]: [{lim_txt}]")
+    print(f"  per-filter N(flux > sigma_lim): [{kept_txt}]")
 
     print("[2/3] Applying observational realism...")
     model.load_obs_features()

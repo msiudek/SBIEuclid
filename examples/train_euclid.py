@@ -69,6 +69,18 @@ def build_parser():
             "'2fwhm'/'3fwhm' use fixed-aperture fluxes. Default: templfit"
         ),
     )
+    p.add_argument(
+        "--sigma-sampler",
+        choices=["empirical", "truncnorm", "mag_lognormal"],
+        default="mag_lognormal",
+        help="Sigma sampling mode for mock-noise injection (default: mag_lognormal)",
+    )
+    p.add_argument(
+        "--detection-model",
+        choices=["hard", "probabilistic"],
+        default="hard",
+        help="Detection model used after noise injection (default: hard)",
+    )
     return p
 
 
@@ -261,8 +273,13 @@ sx.include_sigma = True
 sx.condition_sigma = True
 
 sx.configure_noise_model(
-    sigma_sampler="mag_lognormal",
-    detection_model="hard",
+    sigma_sampler=args.sigma_sampler,
+    detection_model=args.detection_model,
+)
+
+print(
+    f"Noise model: sigma_sampler={sx.noise_sigma_sampler}, "
+    f"detection_model={sx.noise_detection_model}"
 )
 
 
