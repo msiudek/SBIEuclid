@@ -51,6 +51,12 @@ FILTER_NAMES = ["NISP-H", "NISP-J", "NISP-Y", "VIS",
                 "HSC-g", "HSC-z", "DECam-g", "DECam-r", "DECam-i", "DECam-z"]
 N_FILT = len(FILTER_STEMS)
 
+# Keep reference-sample diagnostics inside the same parameter support used in training
+TRAIN_LOGM_MIN = 4.0
+TRAIN_LOGM_MAX = 13.0
+TRAIN_LOGSFR_MIN = -4.0
+TRAIN_LOGSFR_MAX = 3.0
+
 
 # ── photometry column helper ───────────────────────────────────────────────
 def build_phot_col(stem, phot_type, err=False):
@@ -282,13 +288,28 @@ def main():
 
     n_bands_snr = np.sum((snr >= args.snr_min) & np.isfinite(snr), axis=1)
 
-    # Selection mask
+    # Selection mask (aligned with training support ranges)
     has_z    = np.isfinite(z_ref)  & (z_ref > 0)
-    has_mass = np.isfinite(mass_ref) & (mass_ref > 5) & (mass_ref < 13)
+    has_mass = np.isfinite(mass_ref) & (mass_ref > TRAIN_LOGM_MIN) & (mass_ref < TRAIN_LOGM_MAX)
+    has_sfr = np.ones(len(cat), dtype=bool)
+    if sfr_ref_col is not None:
+        has_sfr = np.isfinite(sfr_ref) & (sfr_ref > TRAIN_LOGSFR_MIN) & (sfr_ref < TRAIN_LOGSFR_MAX)
     has_bands = n_bands_snr >= args.n_bands_min
-    good = has_z & has_mass & has_bands
+    good = has_z & has_mass & has_sfr & has_bands
 
-    print(f"  {good.sum()} galaxies pass: z valid + mass valid + ≥{args.n_bands_min} bands SNR≥{args.snr_min}")
+    if sfr_ref_col is not None:
+        print(
+            f"  {good.sum()} galaxies pass: z valid + "
+            f"{TRAIN_LOGM_MIN:.0f}<logM<{TRAIN_LOGM_MAX:.0f} + "
+            f"{TRAIN_LOGSFR_MIN:.0f}<logSFR<{TRAIN_LOGSFR_MAX:.0f} + "
+            f"≥{args.n_bands_min} bands SNR≥{args.snr_min}"
+        )
+    else:
+        print(
+            f"  {good.sum()} galaxies pass: z valid + "
+            f"{TRAIN_LOGM_MIN:.0f}<logM<{TRAIN_LOGM_MAX:.0f} + "
+            f"≥{args.n_bands_min} bands SNR≥{args.snr_min}"
+        )
 
     good_idx = np.where(good)[0]
     if len(good_idx) < args.n_gal:
