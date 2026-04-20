@@ -1,9 +1,9 @@
 """
 Stellar mass estimation for real Euclid galaxies matched to COSMOS-Web.
 
-Uses the trained model_euclid_v1.3.pkl (mass_sfr mode, trained with vis_yj2d
-mock matching) to infer logM* and logSFR from 10-band photometry in the
-matched_euclid_cosmosweb.fits catalog and compares to COSMOS-Web SED masses.
+Uses a trained mass_sfr model to infer logM* and logSFR from 10-band
+photometry in the matched_euclid_cosmosweb.fits catalog and compares to
+COSMOS-Web reference quantities.
 
 Usage
 -----
@@ -130,6 +130,13 @@ def parse_args():
     return p.parse_args()
 
 
+def _find_first_existing_column(cat, candidates):
+    for name in candidates:
+        if name in cat.colnames:
+            return name
+    return None
+
+
 # ── photometry helpers ─────────────────────────────────────────────────────
 
 def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0):
@@ -250,6 +257,25 @@ def main():
     mass_lo  = np.array(cat["mass_l68"], dtype=float)
     mass_hi  = np.array(cat["mass_u68"], dtype=float)
 
+    # Optional SFR reference columns (names vary across COSMOS-Web exports)
+    sfr_ref_col = _find_first_existing_column(cat, ["sfr_med", "logsfr_med", "sfr", "log_sfr"])
+    sfr_lo_col = _find_first_existing_column(cat, ["sfr_l68", "logsfr_l68", "sfr_lo", "log_sfr_lo"])
+    sfr_hi_col = _find_first_existing_column(cat, ["sfr_u68", "logsfr_u68", "sfr_hi", "log_sfr_hi"])
+
+    if sfr_ref_col is not None:
+        sfr_ref = np.array(cat[sfr_ref_col], dtype=float)
+        sfr_lo = np.array(cat[sfr_lo_col], dtype=float) if sfr_lo_col is not None else np.full(len(cat), np.nan)
+        sfr_hi = np.array(cat[sfr_hi_col], dtype=float) if sfr_hi_col is not None else np.full(len(cat), np.nan)
+        print(
+            f"Using COSMOS-Web SFR reference columns: med='{sfr_ref_col}', "
+            f"lo='{sfr_lo_col}', hi='{sfr_hi_col}'"
+        )
+    else:
+        sfr_ref = np.full(len(cat), np.nan)
+        sfr_lo = np.full(len(cat), np.nan)
+        sfr_hi = np.full(len(cat), np.nan)
+        print("No COSMOS-Web SFR reference columns found; SFR comparison plot will be skipped")
+
     # Per-band SNR
     with np.errstate(divide='ignore', invalid='ignore'):
         snr = np.abs(flux / np.where(fluxerr > 0, fluxerr, np.nan))
@@ -279,6 +305,9 @@ def main():
     mass_sel    = mass_ref[sel]
     mass_lo_sel = mass_lo[sel]
     mass_hi_sel = mass_hi[sel]
+    sfr_sel     = sfr_ref[sel]
+    sfr_lo_sel  = sfr_lo[sel]
+    sfr_hi_sel  = sfr_hi[sel]
     nbands_sel  = n_bands_snr[sel]
 
     # ------------------------------------------------------------------
@@ -420,6 +449,9 @@ def main():
              logM_cosmosweb=mass_sel,
              logM_cosmosweb_lo=mass_lo_sel,
              logM_cosmosweb_hi=mass_hi_sel,
+             logSFR_cosmosweb=sfr_sel,
+             logSFR_cosmosweb_lo=sfr_lo_sel,
+             logSFR_cosmosweb_hi=sfr_hi_sel,
              z=z_sel, n_bands=nbands_sel,
              posteriors=posteriors)
     print(f"\nResults saved to {result_file}")
@@ -438,6 +470,16 @@ def main():
     print(f"  SBI logM* range      : [{logM_med[valid].min():.2f}, {logM_med[valid].max():.2f}]")
     print(f"  COSMOS-Web logM range: [{mass_sel[valid].min():.2f}, {mass_sel[valid].max():.2f}]")
 
+    sfr_valid = np.isfinite(logSFR_med) & np.isfinite(sfr_sel)
+    if np.any(sfr_valid):
+        sfr_delta = logSFR_med[sfr_valid] - sfr_sel[sfr_valid]
+        print(f"\nSFR comparison (N={sfr_valid.sum()}):")
+        print(f"  Median Δ(SBI-CWeb)   = {np.median(sfr_delta):.3f} dex")
+        print(f"  NMAD(Δ)              = {1.4826 * np.median(np.abs(sfr_delta - np.median(sfr_delta))):.3f} dex")
+        print(f"  Std(Δ)               = {np.std(sfr_delta):.3f} dex")
+        print(f"  SBI logSFR range     : [{logSFR_med[sfr_valid].min():.2f}, {logSFR_med[sfr_valid].max():.2f}]")
+        print(f"  COSMOS-Web logSFR range: [{sfr_sel[sfr_valid].min():.2f}, {sfr_sel[sfr_valid].max():.2f}]")
+
     # ------------------------------------------------------------------
     # 8. Plots (shared validation plotting utilities)
     # ------------------------------------------------------------------
@@ -452,6 +494,10 @@ def main():
     plot_file3 = vplots.plot_sfr_mass(logM_med[valid], logSFR_med[valid], z_sel[valid], outdir)
     if plot_file3 is not None:
         print(f"Plot saved to {plot_file3}")
+
+    plot_file4 = vplots.plot_sfr_comparison(sfr_sel, logSFR_med, z_sel, outdir)
+    if plot_file4 is not None:
+        print(f"Plot saved to {plot_file4}")
 
     print("\nDone.")
 

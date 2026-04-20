@@ -592,3 +592,78 @@ def plot_sfr_mass(logm_pred, logsfr_pred, z_vals, outdir):
 	fig.savefig(out, dpi=150, bbox_inches="tight")
 	plt.close(fig)
 	return out
+
+
+def plot_sfr_comparison(sfr_ref, sfr_pred, z_vals, outdir, title_prefix="SBI vs COSMOS-Web SFR"):
+	"""Scatter comparison between reference and inferred SFR."""
+	_style()
+	sfr_ref = np.asarray(sfr_ref, dtype=float)
+	sfr_pred = np.asarray(sfr_pred, dtype=float)
+	z_vals = np.asarray(z_vals, dtype=float)
+	valid = np.isfinite(sfr_ref) & np.isfinite(sfr_pred) & np.isfinite(z_vals)
+	if valid.sum() == 0:
+		return None
+
+	delta = sfr_pred[valid] - sfr_ref[valid]
+	bias = np.median(delta)
+	nmad = 1.4826 * np.median(np.abs(delta - bias))
+
+	fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+
+	ax = axes[0]
+	sc = ax.scatter(
+		sfr_ref[valid],
+		sfr_pred[valid],
+		c=z_vals[valid],
+		cmap="plasma_r",
+		vmin=0,
+		vmax=4,
+		s=12,
+		alpha=0.6,
+		linewidths=0,
+		rasterized=True,
+	)
+	s_range = np.array([sfr_ref[valid].min() - 0.3, sfr_ref[valid].max() + 0.3])
+	ax.plot(s_range, s_range, "k--", lw=1, label="1:1")
+	ax.plot(s_range, s_range + bias, "r-", lw=1, label=f"bias = {bias:+.2f} dex")
+	cb = fig.colorbar(sc, ax=ax)
+	cb.set_label("photometric redshift z")
+	ax.set_xlabel("COSMOS-Web log SFR (reference)")
+	ax.set_ylabel("SBI log SFR")
+	ax.set_title(f"{title_prefix}\nN={valid.sum()}, NMAD={nmad:.3f} dex")
+	ax.legend(fontsize=9)
+	ax.set_aspect("equal", "box")
+
+	ax2 = axes[1]
+	sc2 = ax2.scatter(
+		z_vals[valid],
+		delta,
+		c=sfr_ref[valid],
+		cmap="viridis",
+		s=12,
+		alpha=0.6,
+		linewidths=0,
+		rasterized=True,
+	)
+	ax2.axhline(0, color="k", lw=1, ls="--")
+	ax2.axhline(bias, color="r", lw=1, label=f"median = {bias:+.2f} dex")
+	z_bins = np.linspace(z_vals[valid].min(), z_vals[valid].max(), 12)
+	z_mid = 0.5 * (z_bins[:-1] + z_bins[1:])
+	dmed = [
+		np.median(delta[(z_vals[valid] >= z_bins[k]) & (z_vals[valid] < z_bins[k + 1])])
+		for k in range(len(z_mid))
+	]
+	ax2.plot(z_mid, dmed, "r-o", ms=4, lw=1.5, label="running median")
+	cb2 = fig.colorbar(sc2, ax=ax2)
+	cb2.set_label("COSMOS-Web log SFR")
+	ax2.set_xlabel("photometric redshift z")
+	ax2.set_ylabel("Δ log SFR (SBI − COSMOS-Web) [dex]")
+	ax2.set_title("SFR residual vs redshift")
+	ax2.legend(fontsize=9)
+	ax2.set_ylim(-3, 3)
+
+	fig.tight_layout()
+	out = Path(outdir) / "sfr_comparison.png"
+	fig.savefig(out, dpi=150, bbox_inches="tight")
+	plt.close(fig)
+	return out
