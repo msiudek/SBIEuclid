@@ -806,9 +806,14 @@ class sbipix():
         logSFR = _to_log10_if_linear(atlas['sfr'])
         z = _as_1d(atlas['zval'])
 
-        # Mag sanity: 15 < median_mag < 35 (removes pathological SEDs)
+        # Magnitude sanity: only require a finite median magnitude.
+        # A previous hard cut (15 < median_mag < 35) removed a large population
+        # of faint, high-redshift galaxies and substantially weakened the
+        # mass–flux relation in the retained atlas, which in turn biased
+        # inference high at z >~ 1. Keep all finite SEDs here and let the
+        # downstream noise/detection model define the observable sample.
         median_mag_per_gal = np.nanmedian(obs, axis=1)  # obs already in AB mag
-        mag_sane = (median_mag_per_gal > 15.0) & (median_mag_per_gal < 35.0)
+        mag_sane = np.isfinite(median_mag_per_gal)
 
         # t_i < age of the universe at z (cosmological causality)
         try:
