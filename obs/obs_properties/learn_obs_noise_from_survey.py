@@ -12,10 +12,9 @@ def _trapezoid(y, x):
     return getattr(np, "trapz")(y, x)
 
 # Hard-coded configuration
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FITS_PATH = os.path.join(SCRIPT_DIR, "COSMOS_DEEP.fits")
-FILTER_LIST_FILE = os.path.join(SCRIPT_DIR, "filters_to_use.dat")
-FILTER_DIR = SCRIPT_DIR
+FITS_PATH = "COSMOS_DEEP.fits"
+FILTER_LIST_FILE = "filters_to_use.dat"
+FILTER_DIR = "."
 OUT_DIR = "."
 # Photometry types to process:
 #   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
@@ -25,7 +24,7 @@ HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
 PATCH_ID = 98
-SNR_THRESHOLD = 2.0
+SNR_THRESHOLD = 3.0
 
 def build_phot_col(stem, phot_type, err=False):
     """Return the FITS column name for a given filter stem and photometry type.

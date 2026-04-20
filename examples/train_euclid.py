@@ -123,7 +123,7 @@ def build_phot_col(stem, phot_type, err=False):
 
 NOISE_PREFIX = f"north_{args.phot_type}"
 NONDET_MAG = 99.0
-SNR_DETECTION_THRESHOLD = 2.0
+SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
 PATCH_ID = 98
@@ -276,11 +276,13 @@ sx.configure_noise_model(
     sigma_sampler=args.sigma_sampler,
     detection_model=args.detection_model,
 )
+sx.snr_threshold = SNR_DETECTION_THRESHOLD
 
 print(
     f"Noise model: sigma_sampler={sx.noise_sigma_sampler}, "
     f"detection_model={sx.noise_detection_model}"
 )
+print(f"Noise SNR detection threshold: {sx.snr_threshold}")
 
 
 # --------------------------------------------------

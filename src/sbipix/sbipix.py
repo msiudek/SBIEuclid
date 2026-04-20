@@ -184,6 +184,7 @@ class sbipix():
         self.noise_sigma_floor = 8e-3
         self.noise_sigma_mag_min = 1e-6
         self.noise_sigma_mag_max = 10.0
+        self.snr_threshold = 1.0
         
         # Observational properties (loaded from files)
         self.mean_sigma_obs = None

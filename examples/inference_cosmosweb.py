@@ -123,10 +123,10 @@ def parse_args():
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
                    help="Random seed for galaxy selection (default: 42)")
-    p.add_argument("--infer-snr-threshold", type=float, default=1.0,
+    p.add_argument("--infer-snr-threshold", type=float, default=3.0,
                    help=(
                        "Inference-side SNR detection threshold used when building obs vectors "
-                       "from flux/fluxerr (default: 1.0)."
+                       "from flux/fluxerr (default: 3.0)."
                    ))
     p.add_argument("--snr-threshold-sweep", type=float, nargs="*", default=[],
                    help=(
