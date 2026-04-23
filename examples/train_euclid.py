@@ -13,13 +13,6 @@ except ImportError:
 from sbipix import sbipix
 from sbipix.plotting import plot_test_performance, plot_training_history
 from sbipix.utils.sed_utils import flux_ujy_to_mag, load_filter_metadata
-from conditional_calibration import (
-    apply_conditional_delta_mag,
-    fit_conditional_delta_mag,
-    load_conditional_calibration,
-    load_real_detected_mags_from_matched,
-    save_conditional_calibration,
-)
 
 
 def build_parser():
@@ -45,6 +38,11 @@ def build_parser():
         "--skip-train",
         action="store_true",
         help="Skip training and reuse existing model file at model_path/model_name",
+    )
+    p.add_argument(
+        "--sanity-check-only",
+        action="store_true",
+        help="Run preprocessing + flux sanity diagnostics, then exit before training",
     )
     p.add_argument(
         "--mock-match",
@@ -103,55 +101,13 @@ def build_parser():
         help="Detection model used after noise injection (default: hard)",
     )
     p.add_argument(
-        "--conditional-calibration",
-        choices=["off", "fit", "load"],
-        default="off",
+        "--observation-space",
+        choices=["mag", "flux"],
+        default="mag",
         help=(
-            "Temporary empirical calibration layer on post-noise mock magnitudes. "
-            "off: disabled; fit: fit delta_mag(logM,z) from mock-vs-real and apply; "
-            "load: load an existing calibration file and apply."
+            "Feature space passed to SBI: 'mag' keeps legacy magnitude+sigma features; "
+            "'flux' uses noisy flux+sigma_flux and keeps negative noisy realizations."
         ),
-    )
-    p.add_argument(
-        "--conditional-calibration-file",
-        type=str,
-        default="",
-        help=(
-            "Path to .npz calibration file. For mode=fit, this is output path (optional). "
-            "For mode=load, this is required."
-        ),
-    )
-    p.add_argument(
-        "--calib-mass-bins",
-        type=float,
-        nargs="*",
-        default=[8.0, 9.0, 10.0, 10.5, 11.0, 11.5],
-        help="Mass-bin edges for conditional calibration fit (default: 8 9 10 10.5 11 11.5)",
-    )
-    p.add_argument(
-        "--calib-z-bins",
-        type=float,
-        nargs="*",
-        default=[0.0, 0.5, 1.0, 2.0, 3.5],
-        help="Redshift-bin edges for conditional calibration fit (default: 0 0.5 1 2 3.5)",
-    )
-    p.add_argument(
-        "--calib-min-count",
-        type=int,
-        default=30,
-        help="Minimum mock and real counts per (logM,z) bin when fitting calibration (default: 30)",
-    )
-    p.add_argument(
-        "--calib-smooth-passes",
-        type=int,
-        default=2,
-        help="Number of 3x3 smoothing passes for calibration grid (default: 2)",
-    )
-    p.add_argument(
-        "--calib-snr-min",
-        type=float,
-        default=3.0,
-        help="SNR threshold for detected real magnitudes in calibration fit (default: 3)",
     )
     return p
 
@@ -371,12 +327,14 @@ sx.condition_sigma = True
 sx.configure_noise_model(
     sigma_sampler=args.sigma_sampler,
     detection_model=args.detection_model,
+    observation_space=args.observation_space,
 )
 sx.snr_threshold = SNR_DETECTION_THRESHOLD
 
 print(
     f"Noise model: sigma_sampler={sx.noise_sigma_sampler}, "
-    f"detection_model={sx.noise_detection_model}"
+    f"detection_model={sx.noise_detection_model}, "
+    f"observation_space={sx.noise_observation_space}"
 )
 print(f"Noise SNR detection threshold: {sx.snr_threshold}")
 
@@ -413,9 +371,22 @@ sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
 
 if args.mock_match != "none":
+    if args.observation_space == "flux":
+        print(
+            "    Flux-space mode: disabling mag-based mock matching to keep "
+            "a strict flux-only pipeline."
+        )
+        args.mock_match = "none"
+
+if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
     real_mag = load_real_mag_for_mock_match(phot_type=args.phot_type)
-    mock_mag = sx.mag[:, :, 0].T
+    if args.observation_space == "flux":
+        mock_flux = sx.mag[:, :, 0].T
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mock_mag = np.where(mock_flux > 0, flux_ujy_to_mag(mock_flux), np.nan)
+    else:
+        mock_mag = sx.mag[:, :, 0].T
 
     mock_weights, match_msg = compute_mock_match_weights(real_mag, mock_mag)
     print(f"      {match_msg}")
@@ -432,98 +403,38 @@ if args.mock_match != "none":
 else:
     print("    Mock matching disabled (--mock-match none)")
 
+if args.observation_space == "flux":
+    print("    Flux-space strict mode: training features are [flux_i, sigma_flux_i].")
+    flux_obs = np.asarray(sx.mag[:, :, 0], dtype=float)
+    sigma_flux = np.asarray(sx.mag[:, :, 1], dtype=float)
+    flux_true = 3631e6 * 10 ** (-0.4 * np.asarray(sx.obs, dtype=float))
 
-# --------------------------------------------------
-# OPTIONAL CONDITIONAL CALIBRATION LAYER (TEMPORARY)
-# --------------------------------------------------
-if args.conditional_calibration != "off":
-    print(
-        "    Applying TEMPORARY empirical calibration layer "
-        "delta_mag(logM,z,band). This is not a physical model fix."
-    )
-
-    mass_bins = np.asarray(args.calib_mass_bins, dtype=float)
-    z_bins = np.asarray(args.calib_z_bins, dtype=float)
-    if mass_bins.size < 2 or z_bins.size < 2:
-        raise ValueError("Calibration bins must contain at least two edges each.")
-
-    if args.conditional_calibration == "fit":
-        real_cond = load_real_detected_mags_from_matched(
-            matched_fits=MATCHED_CATALOG,
-            filter_stems=FILTER_COL_STEMS,
-            phot_type=args.phot_type,
-            snr_min=args.calib_snr_min,
-        )
-        mock_mag = sx.mag[:, :, 0].T
-        mock_logm = np.asarray(sx.theta[:, 0], dtype=float)
-        mock_z = np.asarray(sx.theta[:, 7], dtype=float)
-
-        delta_grid, n_real_grid, n_mock_grid = fit_conditional_delta_mag(
-            mock_mag_filter_major=mock_mag,
-            mock_logm=mock_logm,
-            mock_z=mock_z,
-            real_mag_gal_major=real_cond["mag"],
-            real_logm=np.asarray(real_cond["logm"], dtype=float),
-            real_z=np.asarray(real_cond["z"], dtype=float),
-            mass_bins=mass_bins,
-            z_bins=z_bins,
-            min_count=args.calib_min_count,
-            smooth_passes=args.calib_smooth_passes,
-            nondet_mag=NONDET_MAG,
-        )
-
-        calibration_file = (
-            Path(args.conditional_calibration_file)
-            if args.conditional_calibration_file
-            else (LIB_DIR / f"conditional_calibration_{args.phot_type}.npz")
-        )
-        save_conditional_calibration(
-            file_path=calibration_file,
-            delta_grid=delta_grid,
-            mass_bins=mass_bins,
-            z_bins=z_bins,
-            filter_names=FILTER_SHORT,
-            n_real_grid=n_real_grid,
-            n_mock_grid=n_mock_grid,
-            note=(
-                "temporary empirical calibration layer for debugging; "
-                "replace with physics-consistent fix"
-            ),
-        )
-        print(f"    Fitted conditional calibration saved: {calibration_file}")
+    flux_finite = flux_obs[np.isfinite(flux_obs)]
+    sigma_finite = sigma_flux[np.isfinite(sigma_flux) & (sigma_flux > 0)]
+    if flux_finite.size > 0:
+        p1, p50, p99 = np.percentile(flux_finite, [1, 50, 99])
+        print(f"    np.percentile(flux, [1,50,99]) = [{p1:.6g}, {p50:.6g}, {p99:.6g}]")
     else:
-        if not args.conditional_calibration_file:
-            raise ValueError(
-                "--conditional-calibration load requires --conditional-calibration-file"
-            )
-        loaded = load_conditional_calibration(args.conditional_calibration_file)
-        delta_grid = loaded["delta_grid"]
-        mass_bins = loaded["mass_bins"]
-        z_bins = loaded["z_bins"]
-        print(f"    Loaded conditional calibration: {args.conditional_calibration_file}")
+        print("    np.percentile(flux, [1,50,99]) = [nan, nan, nan] (no finite flux values)")
 
-    corrected_mag, applied_delta = apply_conditional_delta_mag(
-        mock_mag_filter_major=sx.mag[:, :, 0].T,
-        mock_logm=np.asarray(sx.theta[:, 0], dtype=float),
-        mock_z=np.asarray(sx.theta[:, 7], dtype=float),
-        delta_grid=np.asarray(delta_grid, dtype=float),
-        mass_bins=np.asarray(mass_bins, dtype=float),
-        z_bins=np.asarray(z_bins, dtype=float),
-        nondet_mag=NONDET_MAG,
-    )
-    sx.mag[:, :, 0] = corrected_mag.T
-
-    applied = applied_delta[np.isfinite(applied_delta) & (applied_delta != 0)]
-    if applied.size > 0:
-        p16, p50, p84 = np.percentile(applied, [16, 50, 84])
-        print(
-            f"    Applied delta_mag (mock-real) stats: "
-            f"p16={p16:+.3f}, p50={p50:+.3f}, p84={p84:+.3f}"
-        )
+    if sigma_finite.size > 0:
+        s1, s50, s99 = np.percentile(sigma_finite, [1, 50, 99])
+        print(f"    np.percentile(sigma_flux, [1,50,99]) = [{s1:.6g}, {s50:.6g}, {s99:.6g}]")
     else:
-        print("    WARNING: calibration layer had no effect (no detected points corrected).")
-else:
-    print("    Conditional calibration layer disabled (--conditional-calibration off)")
+        print("    np.percentile(sigma_flux, [1,50,99]) = [nan, nan, nan] (no positive finite sigma)")
+
+    pull = (flux_obs - flux_true) / np.where(sigma_flux > 0, sigma_flux, np.nan)
+    pull = pull[np.isfinite(pull)]
+    if pull.size > 0:
+        print(f"    np.mean((flux_obs - flux_true)/sigma_flux) = {np.mean(pull):+.4f}")
+        print(f"    np.std((flux_obs - flux_true)/sigma_flux)  = {np.std(pull):.4f}")
+    else:
+        print("    pull stats unavailable (no finite pull values)")
+
+    if args.sanity_check_only:
+        print("    --sanity-check-only set: exiting before training.")
+        raise SystemExit(0)
+
 
 
 

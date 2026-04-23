@@ -51,7 +51,6 @@ from sbipix.utils.validation_plots import (
     plot_intrinsic_color_vs_parameters,
 )
 from sbipix.plotting.diagnostics import plot_theta
-
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import ks_2samp
@@ -80,13 +79,15 @@ COLOR_PAIRS = [
 ]
 
 NONDET_MAG = 99.0
-SNR_DETECTION_THRESHOLD = 2.0
+SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
 CATALOG_FILE = "obs/obs_properties/COSMOS_DEEP.fits"
+MATCHED_CATALOG_FILE = "obs/obs_properties/COSMOS-Web/matched_euclid_cosmosweb.fits"
 PATCH_ID = 98
 AB_ZEROPOINT_JY = 3631.0
 AB_ZEROPOINT_UJY = 3631e6
+LN10 = np.log(10.0)
 SIMULATION_CONFIG = {
     "mass_min": 6.0,
     "mass_max": 11.5,
@@ -570,19 +571,92 @@ def get_mock_arrays(model):
 
     Returns a dict with filter-major arrays.
     """
-    # model.mag shape: (n_sim, n_filt, 2) — [:, :, 0]=mag, [:, :, 1]=sigma
-    mock_mag = model.mag[:, :, 0].T.copy()     # (n_filt, n_sim)
-    mock_sigma = model.mag[:, :, 1].T.copy()   # (n_filt, n_sim)
+    # model.mag shape: (n_sim, n_filt, 2)
+    # observation_space='mag'  -> [:,:,0]=mag,  [:,:,1]=sigma_mag
+    # observation_space='flux' -> [:,:,0]=flux, [:,:,1]=sigma_flux
+    obs_space = getattr(model, "noise_observation_space", "mag")
+    first = model.mag[:, :, 0].T.copy()
+    second = model.mag[:, :, 1].T.copy()
+
+    if obs_space == "flux":
+        mock_flux = first
+        mock_sigma_flux = np.maximum(second, 1e-12)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mock_mag = np.where(mock_flux > 0, flux_ujy_to_mag(mock_flux), NONDET_MAG)
+            mock_sigma = np.where(
+                mock_flux > 0,
+                (2.5 / LN10) * np.abs(mock_sigma_flux / np.maximum(np.abs(mock_flux), 1e-12)),
+                np.nan,
+            )
+    else:
+        mock_mag = first
+        mock_sigma = second
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mock_flux = np.where(mock_mag < NONDET_MAG - 0.5, mag_to_flux_ujy(mock_mag), np.nan)
+        mock_sigma_flux = np.full_like(mock_flux, np.nan, dtype=float)
+
     true_mag = model.obs.T.copy()
     true_flux = mag_to_flux_ujy(true_mag)
     indices = np.arange(model.obs.shape[0], dtype=int)
     return {
         "mag": mock_mag,
         "sigma": mock_sigma,
+        "flux": mock_flux,
+        "sigma_flux": mock_sigma_flux,
+        "observation_space": obs_space,
         "true_mag": true_mag,
         "true_flux": true_flux,
         "indices": indices,
     }
+
+
+def run_flux_asinh_slope_diagnostic(model, mock_data):
+    """Report slope(logM vs asinh(flux/softening)) before/after noise in z bins."""
+    if getattr(model, "noise_observation_space", "mag") != "flux":
+        return
+
+    z_bins = [
+        (0.00, 0.25, "z=[0.00,0.25)"),
+        (0.25, 0.50, "z=[0.25,0.50)"),
+        (0.50, 1.00, "z=[0.50,1.00)"),
+        (1.00, 1.50, "z=[1.00,1.50)"),
+        (1.50, 2.00, "z=[1.50,2.00)"),
+        (2.00, 3.00, "z=[2.00,3.00)"),
+        (3.00, 5.00, "z=[3.00,5.00)"),
+    ]
+
+    def _slope(x, y):
+        ok = np.isfinite(x) & np.isfinite(y)
+        if np.sum(ok) < 20:
+            return np.nan
+        return float(np.polyfit(x[ok], y[ok], 1)[0])
+
+    logm = np.asarray(model.theta[:, 0], dtype=float)
+    z = np.asarray(model.theta[:, 7], dtype=float)
+    before_flux = np.asarray(model.true_flux if hasattr(model, "true_flux") else mock_data["true_flux"], dtype=float)
+    after_flux = np.asarray(mock_data["flux"], dtype=float)
+    limits = np.asarray(model.limits, dtype=float)
+
+    print("\nFlux-space slope diagnostic (asinh transform; includes negative noisy flux):")
+    print("  band       z_bin            slope_before  slope_after   ratio")
+    collapse = 0
+    total = 0
+    for bi, band in enumerate(FILTER_SHORT):
+        soft = max(float(limits[bi]), 1e-12)
+        yb = np.arcsinh(before_flux[bi] / soft)
+        ya = np.arcsinh(after_flux[bi] / soft)
+        for z0, z1, label in z_bins:
+            m = (z >= z0) & (z < z1)
+            sb = _slope(logm[m], yb[m])
+            sa = _slope(logm[m], ya[m])
+            if np.isfinite(sb) and np.isfinite(sa) and abs(sb) > 1e-12:
+                ratio = sa / sb
+                total += 1
+                if ratio < 0.5:
+                    collapse += 1
+                print(f"  {band:<10} {label:<16} {sb:+.4f}      {sa:+.4f}      {ratio:+.3f}")
+    if total > 0:
+        print(f"  Collapse summary: {collapse}/{total} bins with ratio<0.5 ({100*collapse/total:.1f}%)")
 
 
 def build_validation_model(args, obs_dir, library_dir):
@@ -614,6 +688,7 @@ def build_validation_model(args, obs_dir, library_dir):
     model.configure_noise_model(
         sigma_sampler=args.sigma_sampler,
         detection_model=args.detection_model,
+        observation_space=args.observation_space,
     )
     # Enforce the SAME SNR detection threshold in mocks as used for real data selection
     model.snr_threshold = SNR_DETECTION_THRESHOLD
@@ -800,6 +875,8 @@ def build_parser():
                    help="Distribution used to sample sigma values (default: empirical; mag_lognormal fits log(sigma)=a+b*mag per band)")
     p.add_argument("--detection-model", choices=["hard", "probabilistic"], default="probabilistic",
                    help="Detection model after noise injection: hard flux threshold or smooth S/N transition (default: probabilistic)")
+    p.add_argument("--observation-space", choices=["mag", "flux"], default="mag",
+                   help="Noise model output space: mag (legacy) or flux (keeps negative noisy realizations)")
     p.add_argument("--mock-match", choices=["none", "vis_yj2d"], default="none",
                    help="Reweight/resample mocks to match real observed distributions (default: none)")
     p.add_argument("--calibrate", action="store_true",
@@ -842,6 +919,7 @@ def main():
     print(f"  limits file    = {limits_file}")
     print(f"  sigma sampler  = {model.noise_sigma_sampler}")
     print(f"  detect model   = {model.noise_detection_model}")
+    print(f"  obs space      = {model.noise_observation_space}")
     print(f"  mock match     = {args.mock_match}")
     print(f"  calibrate      = {'on' if args.calibrate else 'off'}")
     print(f"  det SNR cut    = {SNR_DETECTION_THRESHOLD}")
@@ -938,6 +1016,7 @@ def main():
     # Extract mock arrays  +  noiseless SED mags
     # ------------------------------------------------------------------
     mock_data = get_mock_arrays(model)
+    run_flux_asinh_slope_diagnostic(model, mock_data)
 
     # Single-band median mock/real flux check (requested quick ratio sanity)
     real_flux_band = real_data["flux"][debug_band]

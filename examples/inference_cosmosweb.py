@@ -119,6 +119,12 @@ def parse_args():
                    choices=["templfit", "2fwhm", "3fwhm"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
                          "'2fwhm', or '3fwhm' aperture. Default: templfit"))
+    p.add_argument("--observation-space", type=str, default="mag",
+                   choices=["mag", "flux"],
+                   help=(
+                       "Feature space expected by the model: 'mag' for legacy mag+sigma, "
+                       "'flux' for flux+sigma_flux (keeps negative noisy realizations)."
+                   ))
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
     p.add_argument("--seed",        type=int,   default=42,
@@ -145,15 +151,14 @@ def _find_first_existing_column(cat, candidates):
 
 # ── photometry helpers ─────────────────────────────────────────────────────
 
-def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0):
+def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0, observation_space="mag"):
     """
-    Convert (n_gal, n_filt) flux/fluxerr (μJy) arrays to the 20-dim
-    observation vector expected by the sbipix model:
-        [mag_0, sig_0, mag_1, sig_1, ..., mag_9, sig_9]  (interleaved)
-    which gets reshaped to (n_gal, 2*n_filt).
+        Build the interleaved observation vector expected by the sbipix model.
 
-    Non-detections (flux < limit, SNR < snr_threshold, or non-finite) get mag=99 and
-    mag_sigma = mag(limit).
+        observation_space='mag':
+            [mag_0, sig_mag_0, ..., mag_9, sig_mag_9], with mag=99 for non-detections.
+        observation_space='flux':
+            [flux_0, sig_flux_0, ..., flux_9, sig_flux_9], keeping full flux distribution.
     """
     n_gal = flux_2d.shape[0]
     obs = np.zeros((n_gal, 2 * N_FILT), dtype=np.float32)
@@ -161,6 +166,20 @@ def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0):
     for j, lim in enumerate(limits):
         f   = flux_2d[:, j]
         fe  = fluxerr_2d[:, j]
+        if observation_space == "flux":
+            flux_obs = np.asarray(f, dtype=float)
+            sigma_flux = np.asarray(fe, dtype=float)
+
+            bad_flux = ~np.isfinite(flux_obs)
+            flux_obs[bad_flux] = 0.0
+
+            bad_sigma = ~np.isfinite(sigma_flux) | (sigma_flux <= 0)
+            sigma_flux[bad_sigma] = max(float(lim), 1e-12)
+
+            obs[:, 2 * j] = flux_obs
+            obs[:, 2 * j + 1] = sigma_flux
+            continue
+
         with np.errstate(divide='ignore', invalid='ignore'):
             snr = np.abs(f / np.where(fe > 0, fe, np.nan))
         snr_non_detect = ~np.isfinite(snr) | (snr < snr_threshold)
@@ -177,7 +196,6 @@ def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0):
             sig = np.where(non_detect,
                            lim_mag,
                            (2.5 / np.log(10)) * np.abs(fe / f))
-        # clip absurd errors
         sig = np.clip(sig, 0.001, 5.0)
 
         obs[:, 2 * j]     = mag
@@ -188,8 +206,20 @@ def build_obs_array(flux_2d, fluxerr_2d, limits, snr_threshold=1.0):
 
 def run_inference_at_threshold(sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, args, snr_threshold):
     """Run posterior inference for one inference-side SNR threshold."""
-    obs = build_obs_array(flux_sel, fluxerr_sel, limits, snr_threshold=snr_threshold)
-    detection_fraction = float(np.mean(obs[:, ::2] < 99.0))
+    obs = build_obs_array(
+        flux_sel,
+        fluxerr_sel,
+        limits,
+        snr_threshold=snr_threshold,
+        observation_space=args.observation_space,
+    )
+
+    if args.observation_space == "flux":
+        with np.errstate(divide='ignore', invalid='ignore'):
+            snr = np.abs(obs[:, ::2] / np.where(obs[:, 1::2] > 0, obs[:, 1::2], np.nan))
+        detection_fraction = float(np.mean(np.isfinite(snr) & (snr >= snr_threshold)))
+    else:
+        detection_fraction = float(np.mean(obs[:, ::2] < 99.0))
 
     posteriors = sx._get_posterior_obs(
         obs,
@@ -351,7 +381,11 @@ def main():
     sx.include_limit   = True
     sx.include_sigma   = True
     sx.condition_sigma = True
-    sx.configure_noise_model(sigma_sampler="mag_lognormal", detection_model="hard")
+    sx.configure_noise_model(
+        sigma_sampler="mag_lognormal",
+        detection_model="hard",
+        observation_space=args.observation_space,
+    )
     sx.load_obs_features()    # populates sx.limits, sx.mean_sigma_obs, sx.percentiles, etc.
     limits = sx.limits        # (n_filt,) in μJy
     print(f"  Flux limits (μJy): {np.array(limits).round(6)}")
@@ -360,14 +394,30 @@ def main():
     # 3. Build observation array (n_gal, 2*n_filt) - correct mag+magerr
     # ------------------------------------------------------------------
     print("Building observation array...")
-    obs = build_obs_array(flux_sel, fluxerr_sel, limits, snr_threshold=args.infer_snr_threshold)
+    obs = build_obs_array(
+        flux_sel,
+        fluxerr_sel,
+        limits,
+        snr_threshold=args.infer_snr_threshold,
+        observation_space=args.observation_space,
+    )
     print(f"  obs shape: {obs.shape}  ({len(sel)} galaxies, {2*N_FILT} features)")
+    print(f"  observation space: {args.observation_space}")
     print(f"  inference SNR threshold: {args.infer_snr_threshold}")
-    print(f"  detection fraction (<99 mag): {np.mean(obs[:, ::2] < 99.0):.3f}")
+    if args.observation_space == "flux":
+        with np.errstate(divide='ignore', invalid='ignore'):
+            snr_dbg = np.abs(obs[:, ::2] / np.where(obs[:, 1::2] > 0, obs[:, 1::2], np.nan))
+        print(f"  detection fraction (SNR>={args.infer_snr_threshold:g}): {np.mean(np.isfinite(snr_dbg) & (snr_dbg >= args.infer_snr_threshold)):.3f}")
+    else:
+        print(f"  detection fraction (<99 mag): {np.mean(obs[:, ::2] < 99.0):.3f}")
 
     # Quick sanity: print first galaxy
-    print(f"  galaxy[0] mags : {obs[0, ::2].round(2)}")
-    print(f"  galaxy[0] sigs : {obs[0, 1::2].round(3)}")
+    if args.observation_space == "flux":
+        print(f"  galaxy[0] flux : {obs[0, ::2].round(6)}")
+        print(f"  galaxy[0] sigF : {obs[0, 1::2].round(6)}")
+    else:
+        print(f"  galaxy[0] mags : {obs[0, ::2].round(2)}")
+        print(f"  galaxy[0] sigs : {obs[0, 1::2].round(3)}")
 
     # ------------------------------------------------------------------
     # 4. Load model and run inference

@@ -159,6 +159,8 @@ def sfh_delayed_exponential(t, logmassval, tau, ti):
         (sfh, timeax) where sfh is SFR in M☉/Gyr and timeax is time axis in Gyr
     """
     from scipy import integrate
+
+    tau = float(np.clip(tau, 0.1, 10.0))
     
     # Normalize to get correct total stellar mass
     integral_result = integrate.quad(
@@ -172,6 +174,24 @@ def sfh_delayed_exponential(t, logmassval, tau, ti):
     A = 10**logmassval / denom
     
     sfh = A * (t-ti) * np.exp(-(t-ti)/tau) * escalon(t, ti)
+
+    # Add stochastic flexibility in recent SFH while preserving total formed mass.
+    active = sfh > 0
+    if np.any(active):
+        sfh_scatter = 10.0 ** np.random.normal(0.0, 0.3, size=sfh.shape)
+        sfh[active] *= sfh_scatter[active]
+
+        n_recent = max(1, int(0.1 * len(t)))
+        recent_boost = np.random.uniform(0.3, 3.0)
+        sfh[-n_recent:] *= recent_boost
+
+        # Renormalize to the target stellar mass scale.
+        dt = np.gradient(t)
+        current_mass = np.sum(sfh * dt)
+        target_mass = 10 ** logmassval
+        if np.isfinite(current_mass) and current_mass > 0:
+            sfh *= (target_mass / current_mass)
+
     return sfh, t  # Units are M☉/Gyr & Gyr
 
 
@@ -200,8 +220,8 @@ def convert_to_microjansky(spec, zval, cosmo):
     L_sun = 3.828e33  # erg/s
     spec_erg = spec * L_sun
     
-    # Convert to flux at Earth: F = L / (4π d_L² (1+z)).
-    flux_erg = spec_erg / (4 * np.pi * d_L**2 * (1 + zval))
+    # Convert to flux at Earth: F = L / (4π d_L²).
+    flux_erg = spec_erg / (4 * np.pi * d_L**2)
     # Convert to Jansky (1 Jy = 1e-23 erg/s/cm²/Hz)
     flux_jy = flux_erg / 1e-23
     

@@ -172,6 +172,7 @@ class sbipix():
         self.condition_sigma = False
         self.noise_sigma_sampler = 'empirical'
         self.noise_detection_model = 'hard'
+        self.noise_observation_space = 'mag'
         self.noise_sigma_mag_params = None
         self.noise_sigma_mag_ranges = None
         self.noise_sigma_mag_interp_centers = None
@@ -296,12 +297,21 @@ class sbipix():
 
     def configure_noise_model(self,
                               sigma_sampler=None,
-                              detection_model=None):
+                              detection_model=None,
+                              observation_space=None):
         """Configure how observational uncertainties are sampled."""
         if sigma_sampler is not None:
             self.noise_sigma_sampler = str(sigma_sampler)
         if detection_model is not None:
             self.noise_detection_model = str(detection_model)
+        if observation_space is not None:
+            value = str(observation_space).strip().lower()
+            if value not in ('mag', 'flux'):
+                raise ValueError(
+                    f"Unsupported observation_space={observation_space!r}. "
+                    "Use 'mag' or 'flux'."
+                )
+            self.noise_observation_space = value
 
     def _compute_bin_centers(self, filter_idx):
         """Return magnitude-bin centers from percentile boundaries."""
@@ -1289,11 +1299,18 @@ class sbipix():
                     f"|pull|<=1: {100*frac1:.1f}% |pull|<=2: {100*frac2:.1f}%"
                 )
 
-        # --- convert to mag ONLY for detected, positive-flux galaxies ---
-        # Do NOT clip negative fluxes to 1e-12 — that would invent bright mags.
-        det_pos = detected & (flux_obs_raw > 0)
+        # --- convert to mag ---
+        # Production path keeps the physical positive-flux requirement.
+        # Debug path bypasses positivity gating to isolate censoring effects.
+        if DEBUG_SIGMA_ONLY or DEBUG_NOISE_ONLY:
+            det_pos = detected
+            flux_for_mag = np.maximum(flux_obs_raw, 1e-12)
+        else:
+            det_pos = detected & (flux_obs_raw > 0)
+            flux_for_mag = flux_obs_raw
+
         mag_obs = np.full_like(mag_array, np.nan)
-        mag_obs[det_pos] = mag_conversion(flux_obs_raw[det_pos], convert_to='mag')
+        mag_obs[det_pos] = mag_conversion(flux_for_mag[det_pos], convert_to='mag')
 
         # Debug: SNR distribution for diagnosed bands
         snr_med = float(np.nanmedian(snr))
@@ -1306,6 +1323,22 @@ class sbipix():
             )
 
         # --- outputs ---
+        if getattr(self, 'noise_observation_space', 'mag') == 'flux':
+            # Flux-space production path: keep the full noisy flux distribution,
+            # including negative realizations, and return (flux, sigma_flux).
+            final_flux = np.asarray(flux_obs_raw, dtype=float)
+            final_sigma_flux = np.asarray(sigma_flux, dtype=float)
+
+            bad_flux = ~np.isfinite(final_flux)
+            if np.any(bad_flux):
+                final_flux[bad_flux] = 0.0
+
+            bad_sigma_flux = ~np.isfinite(final_sigma_flux) | (final_sigma_flux <= 0)
+            if np.any(bad_sigma_flux):
+                final_sigma_flux[bad_sigma_flux] = np.maximum(sigma_lim, 1e-12)
+
+            return final_flux, final_sigma_flux
+
         final_mag = np.full_like(mag_array, 99.0)
         final_err = np.full_like(mag_array, mag_conversion(sigma_lim, convert_to='mag'))
 
@@ -1313,7 +1346,7 @@ class sbipix():
         final_mag[valid_det] = mag_obs[valid_det]
 
         # convert σ_flux → σ_mag for storage (use actual observed flux for conversion)
-        final_err[valid_det] = (2.5 / np.log(10)) * sigma_flux[valid_det] / flux_obs_raw[valid_det]
+        final_err[valid_det] = (2.5 / np.log(10)) * sigma_flux[valid_det] / np.maximum(np.abs(flux_obs_raw[valid_det]), 1e-12)
 
         return final_mag, final_err
 
