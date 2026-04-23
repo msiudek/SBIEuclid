@@ -23,16 +23,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-import torch
-import functools
-_original_torch_load = torch.load
-@functools.wraps(_original_torch_load)
-def _patched_torch_load(*args, **kwargs):
-    if "map_location" not in kwargs:
-        kwargs["map_location"] = torch.device("cpu")
-    return _original_torch_load(*args, **kwargs)
-torch.load = _patched_torch_load
 from astropy.table import Table
 from scipy.stats import pearsonr
 
@@ -262,6 +252,10 @@ def main():
     from sbipix.utils import validation_plots as vplots
 
     args = parse_args()
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        print("WARNING: CUDA requested but not available. Falling back to CPU.")
+        args.device = "cpu"
+
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
@@ -444,7 +438,7 @@ def main():
         try:
             posterior.sample(
                 (1,),
-                x=torch.zeros((1, expected_ctx), dtype=torch.float32),
+                x=torch.zeros((1, expected_ctx), dtype=torch.float32, device=args.device),
                 show_progress_bars=False,
             )
             return True, None
