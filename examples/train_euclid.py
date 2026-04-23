@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 from typing import Any
+import re
 import numpy as np
 
 try:
@@ -191,7 +192,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OBS_DIR = PROJECT_ROOT / "obs" / "obs_properties"
 LIB_DIR = PROJECT_ROOT / "library"
 
-ATLAS_NAME  = args.atlas_name
+ATLAS_NPARAM = 2
+
+
+def normalize_atlas_name(atlas_name: str, n_sim: int, n_param: int) -> str:
+    """Return dense_basis atlas stem from either stem or full .dbatlas filename."""
+    value = str(atlas_name).strip()
+    if value.endswith(".dbatlas"):
+        value = value[: -len(".dbatlas")]
+
+    suffix = f"_{int(n_sim)}_Nparam_{int(n_param)}"
+    if value.endswith(suffix):
+        value = value[: -len(suffix)]
+
+    # Safety net for unusual duplicated endings provided by user input.
+    value = re.sub(r"_\d+_Nparam_\d+$", "", value)
+    return value
+
+
+ATLAS_NAME = normalize_atlas_name(args.atlas_name, N_SIM, ATLAS_NPARAM)
 
 # Photometry column helper (mirrors learn_obs_noise_from_survey.py)
 def build_phot_col(stem, phot_type, err=False):
@@ -387,6 +406,10 @@ sx.atlas_path = str(LIB_DIR) + "/"
 sx.model_path = str(LIB_DIR) + "/"
 
 sx.atlas_name = ATLAS_NAME
+print(
+    "Atlas resolved for dense_basis: "
+    f"stem='{sx.atlas_name}', file='{sx.atlas_name}_{N_SIM}_Nparam_{ATLAS_NPARAM}.dbatlas'"
+)
 if args.model_name is not None:
     sx.model_name = args.model_name
 else:
