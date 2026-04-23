@@ -423,31 +423,47 @@ def main():
     # 4. Load model and run inference
     # ------------------------------------------------------------------
     model_file = sx.model_path + sx.model_name
+    anpe_file = sx.model_path + "anpe_" + sx.model_name
     print(f"\nLoading model: {model_file}")
-    with open(model_file, "rb") as f:
-        qphi = pickle.load(f)
 
-    if args.sample_with != "rejection":
-        anpe_file = sx.model_path + "anpe_" + sx.model_name
+    qphi = None
+
+    # Prefer rebuilding posterior from SNPE object when available.
+    # This is more robust than relying on a pickled posterior object and
+    # ensures context dimensionality (photometry vs photometry+z) is consistent.
+    try:
+        with open(anpe_file, "rb") as f:
+            anpe = pickle.load(f)
         try:
-            with open(anpe_file, "rb") as f:
-                anpe = pickle.load(f)
             qphi = anpe.build_posterior(sample_with=args.sample_with)
             print(f"Using posterior sampler backend: {args.sample_with}")
-        except Exception as exc:
+        except TypeError:
+            qphi = anpe.build_posterior()
             print(
-                f"WARNING: could not rebuild posterior with sample_with='{args.sample_with}' "
-                f"from {anpe_file} ({exc}). Falling back to default sampler."
+                "WARNING: current sbi version does not support "
+                "build_posterior(sample_with=...). Using default posterior backend."
             )
+    except Exception as exc:
+        print(
+            f"WARNING: could not load/rebuild posterior from {anpe_file} ({exc}). "
+            "Falling back to pickled posterior object."
+        )
 
-    # Ensure selected posterior model supports conditioning on catalog redshift
+    if qphi is None:
+        with open(model_file, "rb") as f:
+            qphi = pickle.load(f)
+
+    # Ensure selected posterior model supports conditioning on catalog redshift.
     try:
         qphi.sample((1,), x=torch.zeros((1, obs.shape[1] + 1), dtype=torch.float32), show_progress_bars=False)
     except Exception as exc:
         raise RuntimeError(
             "Selected model is incompatible with catalog-redshift conditioning (obs+z input). "
-            "This model expects photometry-only context. Please use/retrain a model trained with infer_z=False. "
-            f"Model: {sx.model_name}; expected context in this script: {obs.shape[1] + 1}."
+            "This posterior expects photometry-only context. "
+            "Please use/retrain a model trained with --z-mode condition (infer_z=False), "
+            "and ensure the matching anpe_* model artifact is available. "
+            f"Model: {sx.model_name}; expected context in this script: {obs.shape[1] + 1}; "
+            f"checked anpe file: {anpe_file}."
         ) from exc
 
     print(
