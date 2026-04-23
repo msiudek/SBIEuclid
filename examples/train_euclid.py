@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from typing import Any
 import numpy as np
 
 try:
@@ -11,6 +12,13 @@ except ImportError:
 from sbipix import sbipix
 from sbipix.plotting import plot_test_performance, plot_training_history
 from sbipix.utils.sed_utils import flux_ujy_to_mag, load_filter_metadata
+from conditional_calibration import (
+    apply_conditional_delta_mag,
+    fit_conditional_delta_mag,
+    load_conditional_calibration,
+    load_real_detected_mags_from_matched,
+    save_conditional_calibration,
+)
 
 
 def build_parser():
@@ -60,6 +68,18 @@ def build_parser():
         help="Output model filename (default auto-selected from params and z-mode)",
     )
     p.add_argument(
+        "--atlas-name",
+        type=str,
+        default="atlas_obs_euclid_north_validate_100000_Nparam_2.dbatlas",
+        help="Atlas filename in library/ to use for training (default: 100k north validate atlas)",
+    )
+    p.add_argument(
+        "--n-sim",
+        type=int,
+        default=100_000,
+        help="Number of simulations represented by the atlas (default: 100000)",
+    )
+    p.add_argument(
         "--phot-type",
         choices=["2fwhm", "3fwhm", "templfit"],
         default="templfit",
@@ -81,17 +101,68 @@ def build_parser():
         default="hard",
         help="Detection model used after noise injection (default: hard)",
     )
+    p.add_argument(
+        "--conditional-calibration",
+        choices=["off", "fit", "load"],
+        default="off",
+        help=(
+            "Temporary empirical calibration layer on post-noise mock magnitudes. "
+            "off: disabled; fit: fit delta_mag(logM,z) from mock-vs-real and apply; "
+            "load: load an existing calibration file and apply."
+        ),
+    )
+    p.add_argument(
+        "--conditional-calibration-file",
+        type=str,
+        default="",
+        help=(
+            "Path to .npz calibration file. For mode=fit, this is output path (optional). "
+            "For mode=load, this is required."
+        ),
+    )
+    p.add_argument(
+        "--calib-mass-bins",
+        type=float,
+        nargs="*",
+        default=[8.0, 9.0, 10.0, 10.5, 11.0, 11.5],
+        help="Mass-bin edges for conditional calibration fit (default: 8 9 10 10.5 11 11.5)",
+    )
+    p.add_argument(
+        "--calib-z-bins",
+        type=float,
+        nargs="*",
+        default=[0.0, 0.5, 1.0, 2.0, 3.5],
+        help="Redshift-bin edges for conditional calibration fit (default: 0 0.5 1 2 3.5)",
+    )
+    p.add_argument(
+        "--calib-min-count",
+        type=int,
+        default=30,
+        help="Minimum mock and real counts per (logM,z) bin when fitting calibration (default: 30)",
+    )
+    p.add_argument(
+        "--calib-smooth-passes",
+        type=int,
+        default=2,
+        help="Number of 3x3 smoothing passes for calibration grid (default: 2)",
+    )
+    p.add_argument(
+        "--calib-snr-min",
+        type=float,
+        default=3.0,
+        help="SNR threshold for detected real magnitudes in calibration fit (default: 3)",
+    )
     return p
 
 
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
-N_SIM    = 100_000   # must match the atlas on disk
+args = build_parser().parse_args()
+N_SIM    = args.n_sim
 N_TEST   = 250
 N_POSTERIOR = 200
 
-args = build_parser().parse_args()
 N_TEST = args.n_test
 
 # Set to True for a quick laptop smoke test (small training subset, few epochs)
@@ -111,7 +182,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OBS_DIR = PROJECT_ROOT / "obs" / "obs_properties"
 LIB_DIR = PROJECT_ROOT / "library"
 
-ATLAS_NAME  = "atlas_obs_euclid_north_validate"
+ATLAS_NAME  = args.atlas_name
 
 # Photometry column helper (mirrors learn_obs_noise_from_survey.py)
 def build_phot_col(stem, phot_type, err=False):
@@ -127,6 +198,7 @@ SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
 PATCH_ID = 98
+MATCHED_CATALOG = OBS_DIR / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"
 
 _FILTER_META = load_filter_metadata("filters_to_use.dat", filt_dir=str(OBS_DIR))
 FILTER_SHORT = [m["short"] for m in _FILTER_META]
@@ -198,8 +270,9 @@ def compute_mock_match_weights(real_mag, mock_mag):
     if n_real == 0 or n_mock_ok == 0:
         return weights, "mock matching skipped: no valid VIS+Y-J objects"
 
-    real_hist, _, _ = np.histogram2d(real_vis[real_ok], real_yj[real_ok], bins=(bins_mag, bins_color))
-    mock_hist, _, _ = np.histogram2d(mock_vis[mock_ok], mock_yj[mock_ok], bins=(bins_mag, bins_color))
+    bins_2d: Any = (bins_mag, bins_color)
+    real_hist, _, _ = np.histogram2d(real_vis[real_ok], real_yj[real_ok], bins=bins_2d)
+    mock_hist, _, _ = np.histogram2d(mock_vis[mock_ok], mock_yj[mock_ok], bins=bins_2d)
 
     real_pdf = real_hist / n_real
     mock_pdf = mock_hist / n_mock_ok
@@ -335,6 +408,99 @@ if args.mock_match != "none":
         print(f"      post-match n_simulation: {sx.n_simulation}")
 else:
     print("    Mock matching disabled (--mock-match none)")
+
+
+# --------------------------------------------------
+# OPTIONAL CONDITIONAL CALIBRATION LAYER (TEMPORARY)
+# --------------------------------------------------
+if args.conditional_calibration != "off":
+    print(
+        "    Applying TEMPORARY empirical calibration layer "
+        "delta_mag(logM,z,band). This is not a physical model fix."
+    )
+
+    mass_bins = np.asarray(args.calib_mass_bins, dtype=float)
+    z_bins = np.asarray(args.calib_z_bins, dtype=float)
+    if mass_bins.size < 2 or z_bins.size < 2:
+        raise ValueError("Calibration bins must contain at least two edges each.")
+
+    if args.conditional_calibration == "fit":
+        real_cond = load_real_detected_mags_from_matched(
+            matched_fits=MATCHED_CATALOG,
+            filter_stems=FILTER_COL_STEMS,
+            phot_type=args.phot_type,
+            snr_min=args.calib_snr_min,
+        )
+        mock_mag = sx.mag[:, :, 0].T
+        mock_logm = np.asarray(sx.theta[:, 0], dtype=float)
+        mock_z = np.asarray(sx.theta[:, 7], dtype=float)
+
+        delta_grid, n_real_grid, n_mock_grid = fit_conditional_delta_mag(
+            mock_mag_filter_major=mock_mag,
+            mock_logm=mock_logm,
+            mock_z=mock_z,
+            real_mag_gal_major=real_cond["mag"],
+            real_logm=np.asarray(real_cond["logm"], dtype=float),
+            real_z=np.asarray(real_cond["z"], dtype=float),
+            mass_bins=mass_bins,
+            z_bins=z_bins,
+            min_count=args.calib_min_count,
+            smooth_passes=args.calib_smooth_passes,
+            nondet_mag=NONDET_MAG,
+        )
+
+        calibration_file = (
+            Path(args.conditional_calibration_file)
+            if args.conditional_calibration_file
+            else (LIB_DIR / f"conditional_calibration_{args.phot_type}.npz")
+        )
+        save_conditional_calibration(
+            file_path=calibration_file,
+            delta_grid=delta_grid,
+            mass_bins=mass_bins,
+            z_bins=z_bins,
+            filter_names=FILTER_SHORT,
+            n_real_grid=n_real_grid,
+            n_mock_grid=n_mock_grid,
+            note=(
+                "temporary empirical calibration layer for debugging; "
+                "replace with physics-consistent fix"
+            ),
+        )
+        print(f"    Fitted conditional calibration saved: {calibration_file}")
+    else:
+        if not args.conditional_calibration_file:
+            raise ValueError(
+                "--conditional-calibration load requires --conditional-calibration-file"
+            )
+        loaded = load_conditional_calibration(args.conditional_calibration_file)
+        delta_grid = loaded["delta_grid"]
+        mass_bins = loaded["mass_bins"]
+        z_bins = loaded["z_bins"]
+        print(f"    Loaded conditional calibration: {args.conditional_calibration_file}")
+
+    corrected_mag, applied_delta = apply_conditional_delta_mag(
+        mock_mag_filter_major=sx.mag[:, :, 0].T,
+        mock_logm=np.asarray(sx.theta[:, 0], dtype=float),
+        mock_z=np.asarray(sx.theta[:, 7], dtype=float),
+        delta_grid=np.asarray(delta_grid, dtype=float),
+        mass_bins=np.asarray(mass_bins, dtype=float),
+        z_bins=np.asarray(z_bins, dtype=float),
+        nondet_mag=NONDET_MAG,
+    )
+    sx.mag[:, :, 0] = corrected_mag.T
+
+    applied = applied_delta[np.isfinite(applied_delta) & (applied_delta != 0)]
+    if applied.size > 0:
+        p16, p50, p84 = np.percentile(applied, [16, 50, 84])
+        print(
+            f"    Applied delta_mag (mock-real) stats: "
+            f"p16={p16:+.3f}, p50={p50:+.3f}, p84={p84:+.3f}"
+        )
+    else:
+        print("    WARNING: calibration layer had no effect (no detected points corrected).")
+else:
+    print("    Conditional calibration layer disabled (--conditional-calibration off)")
 
 
 
