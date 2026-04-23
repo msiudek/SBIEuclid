@@ -18,6 +18,7 @@ from pathlib import Path
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.cosmology import FlatLambdaCDM
 
 
 BAND_MAP = {
@@ -64,24 +65,32 @@ def main() -> None:
     print(f"atlas: {atlas_file}")
     print(f"N total: {len(logm)}")
 
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+    z_nonneg = np.clip(zval, 0.0, None)
+    d_l_cm = cosmo.luminosity_distance(z_nonneg).to("cm").value
+    area_factor = 4.0 * np.pi * d_l_cm**2
+
     # Main band summary + per-band summaries
     rows = []
     for band_name in ["NISP-H", "NISP-J", "NISP-Y"]:
         band_index = BAND_MAP[band_name]
         flux = sed_flux[:, band_index]
+        # Convert observed flux proxy to luminosity-like quantity: L ∝ 4π d_L^2 F
+        flux_cgs = flux * 1e-29  # microJy -> erg/s/cm^2/Hz
+        lum = flux_cgs * area_factor
 
         valid = (
             np.isfinite(logm)
             & np.isfinite(zval)
-            & np.isfinite(flux)
-            & (flux > 0)
+            & np.isfinite(lum)
+            & (lum > 0)
             & (zval >= 0)
         )
         if np.sum(valid) < 10:
             continue
 
         x = zval[valid]
-        log_ml = logm[valid] - np.log10(flux[valid])
+        log_ml = logm[valid] - np.log10(lum[valid])
         slope, intercept = fit_line(x, log_ml)
         rows.append((band_name, slope, intercept, int(np.sum(valid))))
 
@@ -93,16 +102,18 @@ def main() -> None:
 
     # Plot for NISP-H (requested quick diagnostic)
     h_flux = sed_flux[:, BAND_MAP["NISP-H"]]
+    h_flux_cgs = h_flux * 1e-29
+    h_lum = h_flux_cgs * area_factor
     valid_h = (
         np.isfinite(logm)
         & np.isfinite(zval)
-        & np.isfinite(h_flux)
-        & (h_flux > 0)
+        & np.isfinite(h_lum)
+        & (h_lum > 0)
         & (zval >= 0)
     )
 
     xh = zval[valid_h]
-    yh = logm[valid_h] - np.log10(h_flux[valid_h])
+    yh = logm[valid_h] - np.log10(h_lum[valid_h])
     slope_h, intercept_h = fit_line(xh, yh)
 
     plt.figure(figsize=(7, 5))
@@ -111,8 +122,8 @@ def main() -> None:
     plt.plot(xline, slope_h * xline + intercept_h, color="crimson", lw=2,
              label=f"slope={slope_h:.3f}")
     plt.xlabel("z")
-    plt.ylabel("log10(M*/L_H)  [L_H in microJy proxy]")
-    plt.title("Mock atlas diagnostic: log(M/L_H) vs z")
+    plt.ylabel("log10(M*/L_H)  [distance-corrected luminosity proxy]")
+    plt.title("Mock atlas diagnostic: log(M/L_H) vs z (distance corrected)")
     plt.legend()
     plt.colorbar(label="log10(N)")
     plt.tight_layout()

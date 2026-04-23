@@ -503,6 +503,7 @@ else:
         nblocks=4,
         nhidden=128,
         epochs_max=20 if SMOKE_TEST else 200,
+        device=_DEVICE,
     )
 
 
@@ -515,6 +516,7 @@ posterior = sx.test_performance(
     n_test=min(N_TEST, len(sx.theta)),
     n_samples=N_POSTERIOR,
     return_posterior=True,
+    device=_DEVICE,
 )
 
 print("Performance test complete!")

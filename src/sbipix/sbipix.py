@@ -1350,6 +1350,56 @@ class sbipix():
 
         return final_mag, final_err
 
+    def _transform_flux_observation_matrix(self, obs):
+        """Map raw flux features to a numerically stable conditioning space."""
+        obs = np.asarray(obs, dtype=float)
+        if getattr(self, 'noise_observation_space', 'mag') != 'flux':
+            return obs
+
+        if self.limits is None:
+            raise ValueError("Flux-space observation transform requires self.limits to be loaded.")
+
+        softening = np.maximum(np.asarray(self.limits, dtype=float), 1e-12)
+
+        if obs.ndim != 2:
+            raise ValueError(f"Expected 2D observation matrix, got shape {obs.shape}")
+
+        if self.condition_sigma:
+            n_expected = 2 * len(softening)
+            if obs.shape[1] != n_expected:
+                raise ValueError(
+                    f"Flux-space observation matrix width mismatch: got {obs.shape[1]}, expected {n_expected}"
+                )
+
+            flux = obs[:, 0::2]
+            sigma_flux = obs[:, 1::2]
+            flux_tx = np.arcsinh(flux / softening[None, :])
+            sigma_tx = np.log10(np.maximum(sigma_flux / softening[None, :], 1e-12))
+
+            transformed = np.empty_like(obs, dtype=float)
+            transformed[:, 0::2] = flux_tx
+            transformed[:, 1::2] = sigma_tx
+            return transformed
+
+        if obs.shape[1] != len(softening):
+            raise ValueError(
+                f"Flux-space observation matrix width mismatch: got {obs.shape[1]}, expected {len(softening)}"
+            )
+
+        return np.arcsinh(obs / softening[None, :])
+
+    def _get_conditioning_observations(self):
+        """Return training/test conditioning inputs in the configured feature space."""
+        if self.condition_sigma:
+            obs = np.reshape(self.mag, (self.n_simulation, 2 * len(self.obs[0])))
+        elif self.include_mask or self.include_limit or self.include_sigma:
+            obs = self.mag[:, :, 0]
+        else:
+            print('No noise, mask or limit included')
+            obs = self.obs if self.mag is None else self.mag[:, :, 0]
+
+        return self._transform_flux_observation_matrix(obs)
+
 
     def train(self, min_thetas=[6, -10, 0, 0, 0, -2.3, 0, 0], 
               max_thetas=[12, 3, 1, 1, 1, 0.4, 3, 10], 
@@ -1383,13 +1433,7 @@ class sbipix():
         Saves the trained model to self.model_path + self.model_name.
         """
         # Prepare observations based on configuration
-        if self.condition_sigma:
-            obs = np.reshape(self.mag, (self.n_simulation, 2 * len(self.obs[0])))
-        elif self.include_mask or self.include_limit or self.include_sigma:
-            obs = self.mag[:, :, 0]
-        else:
-            print('No noise, mask or limit included')
-            obs = self.obs if self.mag is None else self.mag[:, :, 0]
+        obs = self._get_conditioning_observations()
 
         # Initialize neural network
         maf_model = sbi.neural_nets.posterior_nn(
@@ -1504,12 +1548,7 @@ class sbipix():
         means, stds, posteriors, modes = [], [], [], []
 
         # Prepare test observations
-        if self.condition_sigma:
-            obs = np.reshape(self.mag, (self.n_simulation, 2 * len(self.obs[0])))
-        elif self.include_mask or self.include_limit or self.include_sigma:
-            obs = self.mag[:, :, 0]
-        else:
-            obs = self.obs
+        obs = self._get_conditioning_observations()
 
         if not self.infer_z:
             obs = np.concatenate([obs, np.reshape(self.theta[:, -1], (len(obs), 1))], axis=1)
@@ -1557,6 +1596,8 @@ class sbipix():
         - numpy array
             Posterior samples.
         """
+        obs = self._transform_flux_observation_matrix(obs)
+
         if not self.infer_z and input_z is not None:
             input_z = np.asarray(input_z)
             if input_z.ndim == 0:
