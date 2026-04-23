@@ -106,7 +106,7 @@ def build_parser():
         choices=["off", "fit", "load"],
         default="off",
         help=(
-            "Temporary empirical calibration layer on post-noise mock magnitudes. "
+            "Temporary empirical calibration layer on pre-noise mock magnitudes. "
             "off: disabled; fit: fit delta_mag(logM,z) from mock-vs-real and apply; "
             "load: load an existing calibration file and apply."
         ),
@@ -118,6 +118,15 @@ def build_parser():
         help=(
             "Path to .npz calibration file. For mode=fit, this is output path (optional). "
             "For mode=load, this is required."
+        ),
+    )
+    p.add_argument(
+        "--calib-diagnostic-file",
+        type=str,
+        default="",
+        help=(
+            "Optional output .npz path for a small conditional-calibration diagnostic "
+            "summary (per-band center/roughness stats)."
         ),
     )
     p.add_argument(
@@ -305,6 +314,60 @@ def draw_resample_indices(weights, n_out, seed=0):
     return draw_idx, f"resampled weighted mock catalogue (effective N ≈ {eff_n:.0f})"
 
 
+def emit_calibration_diagnostic(delta_grid, mass_bins, z_bins, filter_names, out_file=None):
+    """Print and optionally save a compact diagnostic for delta_mag(logM,z,band)."""
+    grid = np.asarray(delta_grid, dtype=float)
+    if grid.ndim != 3:
+        print(f"    Calibration diagnostic skipped: expected 3D grid, got shape={grid.shape}")
+        return
+
+    n_bands = grid.shape[0]
+    names = list(filter_names) if filter_names is not None else [f"band_{i}" for i in range(n_bands)]
+    if len(names) != n_bands:
+        names = [f"band_{i}" for i in range(n_bands)]
+
+    center_vals = np.full(n_bands, np.nan, dtype=float)
+    roughness_vals = np.full(n_bands, np.nan, dtype=float)
+
+    for bi in range(n_bands):
+        band_grid = np.asarray(grid[bi], dtype=float)
+        finite = np.isfinite(band_grid)
+        if not np.any(finite):
+            continue
+        center_vals[bi] = float(np.nanmedian(band_grid[finite]))
+        dm = np.abs(np.diff(band_grid, axis=0))
+        dz = np.abs(np.diff(band_grid, axis=1))
+        roughness_vals[bi] = float(np.nanmedian(np.concatenate([dm.ravel(), dz.ravel()])))
+
+    finite_center = np.isfinite(center_vals)
+    finite_rough = np.isfinite(roughness_vals)
+
+    if np.any(finite_center):
+        c16, c50, c84 = np.percentile(center_vals[finite_center], [16, 50, 84])
+        print(
+            "    Calibration grid center (median delta_mag across bands): "
+            f"p16={c16:+.3f}, p50={c50:+.3f}, p84={c84:+.3f}"
+        )
+    if np.any(finite_rough):
+        r16, r50, r84 = np.percentile(roughness_vals[finite_rough], [16, 50, 84])
+        print(
+            "    Calibration grid roughness (median |neighbor delta| across bands): "
+            f"p16={r16:.3f}, p50={r50:.3f}, p84={r84:.3f}"
+        )
+
+    if out_file is not None:
+        out_path = Path(out_file)
+        np.savez_compressed(
+            out_path,
+            center_delta_mag=center_vals,
+            roughness_delta_mag=roughness_vals,
+            filter_names=np.asarray(names, dtype=object),
+            mass_bins=np.asarray(mass_bins, dtype=float),
+            z_bins=np.asarray(z_bins, dtype=float),
+        )
+        print(f"    Calibration diagnostic saved: {out_path}")
+
+
 # --------------------------------------------------
 # INIT MODEL
 # --------------------------------------------------
@@ -366,48 +429,26 @@ sx.load_simulation()
 
 
 # --------------------------------------------------
-# ADD REALISM
+# PRE-NOISE CALIBRATION / ADD REALISM
 # --------------------------------------------------
-print("[2/5] Adding observational realism...")
-sx.load_obs_features()
-sx.add_noise_nan_limit_all()
+print("[2/5] Preparing pre-noise mock photometry...")
 
-# clean NaNs
-ok = np.isfinite(np.sum(sx.theta, axis=1))
-sx.theta = sx.theta[ok]
-sx.mag   = sx.mag[ok]
-sx.obs   = sx.obs[ok]
+if sx.theta is None or sx.obs is None:
+    raise RuntimeError("Atlas load did not populate theta/obs arrays.")
 
-print(f"    {len(sx.theta)} valid galaxies (after NaN cleaning)")
+pre_noise_ok = np.all(np.isfinite(sx.theta), axis=1) & np.all(np.isfinite(sx.obs), axis=1)
+sx.theta = sx.theta[pre_noise_ok]
+sx.obs = sx.obs[pre_noise_ok]
+sx.n_simulation = len(sx.theta)
+print(f"    {len(sx.theta)} valid galaxies after pre-noise finite-value filtering")
 
-# Clip to physical parameter ranges
+# Clip to physical parameter ranges before any calibration or noise injection.
 phys_ok = (sx.theta[:, 0] > 4.0) & (sx.theta[:, 0] < 13.0) & \
           (sx.theta[:, 2] > -4.0) & (sx.theta[:, 2] < 3.0)
 sx.theta = sx.theta[phys_ok]
-sx.mag   = sx.mag[phys_ok]
-sx.obs   = sx.obs[phys_ok]
+sx.obs = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
-
-if args.mock_match != "none":
-    print(f"    Applying mock matching ({args.mock_match})...")
-    real_mag = load_real_mag_for_mock_match(phot_type=args.phot_type)
-    mock_mag = sx.mag[:, :, 0].T
-
-    mock_weights, match_msg = compute_mock_match_weights(real_mag, mock_mag)
-    print(f"      {match_msg}")
-    print(f"      non-zero weights: {(mock_weights > 0).sum()} / {mock_weights.size}")
-
-    draw_idx, resample_msg = draw_resample_indices(mock_weights, n_out=len(sx.theta), seed=0)
-    print(f"      {resample_msg}")
-    if draw_idx is not None:
-        sx.theta = sx.theta[draw_idx]
-        sx.mag = sx.mag[draw_idx]
-        sx.obs = sx.obs[draw_idx]
-        sx.n_simulation = len(sx.theta)
-        print(f"      post-match n_simulation: {sx.n_simulation}")
-else:
-    print("    Mock matching disabled (--mock-match none)")
 
 
 # --------------------------------------------------
@@ -416,7 +457,7 @@ else:
 if args.conditional_calibration != "off":
     print(
         "    Applying TEMPORARY empirical calibration layer "
-        "delta_mag(logM,z,band). This is not a physical model fix."
+        "delta_mag(logM,z,band) to pre-noise mock magnitudes."
     )
 
     mass_bins = np.asarray(args.calib_mass_bins, dtype=float)
@@ -431,7 +472,7 @@ if args.conditional_calibration != "off":
             phot_type=args.phot_type,
             snr_min=args.calib_snr_min,
         )
-        mock_mag = sx.mag[:, :, 0].T
+        mock_mag = sx.obs.T
         mock_logm = np.asarray(sx.theta[:, 0], dtype=float)
         mock_z = np.asarray(sx.theta[:, 7], dtype=float)
 
@@ -463,8 +504,8 @@ if args.conditional_calibration != "off":
             n_real_grid=n_real_grid,
             n_mock_grid=n_mock_grid,
             note=(
-                "temporary empirical calibration layer for debugging; "
-                "replace with physics-consistent fix"
+                "temporary empirical pre-noise calibration layer with smoothed "
+                "bilinear interpolation; replace with physics-consistent fix"
             ),
         )
         print(f"    Fitted conditional calibration saved: {calibration_file}")
@@ -479,28 +520,78 @@ if args.conditional_calibration != "off":
         z_bins = loaded["z_bins"]
         print(f"    Loaded conditional calibration: {args.conditional_calibration_file}")
 
-    corrected_mag, applied_delta = apply_conditional_delta_mag(
-        mock_mag_filter_major=sx.mag[:, :, 0].T,
+    diag_file = (
+        Path(args.calib_diagnostic_file)
+        if args.calib_diagnostic_file
+        else (LIB_DIR / f"conditional_calibration_diag_{args.phot_type}.npz")
+    )
+    emit_calibration_diagnostic(
+        delta_grid=np.asarray(delta_grid, dtype=float),
+        mass_bins=np.asarray(mass_bins, dtype=float),
+        z_bins=np.asarray(z_bins, dtype=float),
+        filter_names=FILTER_SHORT,
+        out_file=diag_file,
+    )
+
+    corrected_obs, applied_delta = apply_conditional_delta_mag(
+        mock_mag_filter_major=sx.obs.T,
         mock_logm=np.asarray(sx.theta[:, 0], dtype=float),
         mock_z=np.asarray(sx.theta[:, 7], dtype=float),
         delta_grid=np.asarray(delta_grid, dtype=float),
         mass_bins=np.asarray(mass_bins, dtype=float),
         z_bins=np.asarray(z_bins, dtype=float),
         nondet_mag=NONDET_MAG,
+        interpolation="bilinear",
     )
-    sx.mag[:, :, 0] = corrected_mag.T
+    sx.obs = corrected_obs.T
 
     applied = applied_delta[np.isfinite(applied_delta) & (applied_delta != 0)]
     if applied.size > 0:
         p16, p50, p84 = np.percentile(applied, [16, 50, 84])
         print(
-            f"    Applied delta_mag (mock-real) stats: "
+            f"    Applied pre-noise delta_mag stats: "
             f"p16={p16:+.3f}, p50={p50:+.3f}, p84={p84:+.3f}"
         )
     else:
-        print("    WARNING: calibration layer had no effect (no detected points corrected).")
+        print("    WARNING: calibration layer had no effect (no points corrected).")
 else:
     print("    Conditional calibration layer disabled (--conditional-calibration off)")
+
+print("    Generating post-noise training photometry...")
+sx.load_obs_features()
+sx.add_noise_nan_limit_all()
+
+if sx.mag is None:
+    raise RuntimeError("Noise injection did not populate mag array.")
+
+# clean any remaining post-noise NaNs
+ok = np.all(np.isfinite(sx.mag), axis=(1, 2))
+sx.theta = sx.theta[ok]
+sx.mag   = sx.mag[ok]
+sx.obs   = sx.obs[ok]
+
+sx.n_simulation = len(sx.theta)
+print(f"    {len(sx.theta)} valid galaxies after post-noise finite-value filtering")
+
+if args.mock_match != "none":
+    print(f"    Applying mock matching ({args.mock_match})...")
+    real_mag = load_real_mag_for_mock_match(phot_type=args.phot_type)
+    mock_mag = sx.mag[:, :, 0].T
+
+    mock_weights, match_msg = compute_mock_match_weights(real_mag, mock_mag)
+    print(f"      {match_msg}")
+    print(f"      non-zero weights: {(mock_weights > 0).sum()} / {mock_weights.size}")
+
+    draw_idx, resample_msg = draw_resample_indices(mock_weights, n_out=len(sx.theta), seed=0)
+    print(f"      {resample_msg}")
+    if draw_idx is not None:
+        sx.theta = sx.theta[draw_idx]
+        sx.mag = sx.mag[draw_idx]
+        sx.obs = sx.obs[draw_idx]
+        sx.n_simulation = len(sx.theta)
+        print(f"      post-match n_simulation: {sx.n_simulation}")
+else:
+    print("    Mock matching disabled (--mock-match none)")
 
 
 
