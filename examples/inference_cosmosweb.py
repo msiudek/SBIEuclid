@@ -23,6 +23,16 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+import torch
+import functools
+_original_torch_load = torch.load
+@functools.wraps(_original_torch_load)
+def _patched_torch_load(*args, **kwargs):
+    if "map_location" not in kwargs:
+        kwargs["map_location"] = torch.device("cpu")
+    return _original_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
 from astropy.table import Table
 from scipy.stats import pearsonr
 
@@ -427,6 +437,19 @@ def main():
     print(f"\nLoading model: {model_file}")
 
     qphi = None
+    expected_ctx = obs.shape[1] + 1
+    probe_errors = []
+
+    def _supports_obs_plus_z(posterior):
+        try:
+            posterior.sample(
+                (1,),
+                x=torch.zeros((1, expected_ctx), dtype=torch.float32),
+                show_progress_bars=False,
+            )
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
 
     # Prefer rebuilding posterior from SNPE object when available.
     # This is more robust than relying on a pickled posterior object and
@@ -443,28 +466,40 @@ def main():
                 "WARNING: current sbi version does not support "
                 "build_posterior(sample_with=...). Using default posterior backend."
             )
+
+        ok, err = _supports_obs_plus_z(qphi)
+        if not ok:
+            probe_errors.append(f"anpe posterior incompatible with obs+z context ({err})")
+            qphi = None
     except Exception as exc:
         print(
             f"WARNING: could not load/rebuild posterior from {anpe_file} ({exc}). "
             "Falling back to pickled posterior object."
         )
+        probe_errors.append(f"anpe load/rebuild failed ({exc})")
 
     if qphi is None:
         with open(model_file, "rb") as f:
-            qphi = pickle.load(f)
+            qphi_model = pickle.load(f)
 
-    # Ensure selected posterior model supports conditioning on catalog redshift.
-    try:
-        qphi.sample((1,), x=torch.zeros((1, obs.shape[1] + 1), dtype=torch.float32), show_progress_bars=False)
-    except Exception as exc:
+        ok, err = _supports_obs_plus_z(qphi_model)
+        if ok:
+            qphi = qphi_model
+            print("Using pickled posterior object from model file.")
+        else:
+            probe_errors.append(f"model posterior incompatible with obs+z context ({err})")
+
+    # Ensure at least one candidate posterior supports conditioning on catalog redshift.
+    if qphi is None:
+        detail = " | ".join(probe_errors) if len(probe_errors) > 0 else "no probe details available"
         raise RuntimeError(
             "Selected model is incompatible with catalog-redshift conditioning (obs+z input). "
             "This posterior expects photometry-only context. "
             "Please use/retrain a model trained with --z-mode condition (infer_z=False), "
             "and ensure the matching anpe_* model artifact is available. "
-            f"Model: {sx.model_name}; expected context in this script: {obs.shape[1] + 1}; "
-            f"checked anpe file: {anpe_file}."
-        ) from exc
+            f"Model: {sx.model_name}; expected context in this script: {expected_ctx}; "
+            f"checked anpe file: {anpe_file}; probe details: {detail}."
+        )
 
     print(
         f"Running inference on {len(sel)} galaxies × {args.n_samples} samples "
