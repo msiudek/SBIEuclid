@@ -569,7 +569,8 @@ def main():
              logSFR_cosmosweb_lo=sfr_lo_sel,
              logSFR_cosmosweb_hi=sfr_hi_sel,
              z=z_sel, n_bands=nbands_sel,
-             posteriors=posteriors)
+             posteriors=posteriors,
+             selected_indices=sel)
     print(f"\nResults saved to {result_file}")
 
     # ------------------------------------------------------------------
