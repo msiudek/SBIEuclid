@@ -275,9 +275,15 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
+
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import r2_score
+
     rows = []
 
+
     print("Running selection sweep...")
+    plot_grid = {}
     for snr_min in args.snr_grid:
         n_bands = np.sum((snr >= snr_min) & np.isfinite(snr), axis=1)
 
@@ -302,6 +308,8 @@ def main():
                         "sfr_median_delta": np.nan,
                         "sfr_nmad": np.nan,
                         "corr_deltaM_z": np.nan,
+                        "mass_r2": np.nan,
+                        "sfr_r2": np.nan,
                     }
                 )
                 continue
@@ -335,10 +343,14 @@ def main():
                 mass_slope, mass_intercept = np.polyfit(true_mass, pred_mass, 1)
                 sfr_slope, sfr_intercept = np.polyfit(true_sfr, pred_sfr, 1)
                 corr_deltaM_z = np.corrcoef(d_mass, z_sel)[0, 1]
+                mass_r2 = r2_score(true_mass, pred_mass)
+                sfr_r2 = r2_score(true_sfr, pred_sfr)
             else:
                 mass_slope, mass_intercept = np.nan, np.nan
                 sfr_slope, sfr_intercept = np.nan, np.nan
                 corr_deltaM_z = np.nan
+                mass_r2 = np.nan
+                sfr_r2 = np.nan
 
             row = {
                 "snr_min": float(snr_min),
@@ -354,16 +366,49 @@ def main():
                 "sfr_median_delta": float(np.nanmedian(d_sfr)),
                 "sfr_nmad": float(nmad(d_sfr)),
                 "corr_deltaM_z": float(corr_deltaM_z),
+                "mass_r2": float(mass_r2),
+                "sfr_r2": float(sfr_r2),
             }
             rows.append(row)
+
+            # Plot inferred vs true for logM
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+            lim_mass = [np.nanmin([true_mass, pred_mass]), np.nanmax([true_mass, pred_mass])]
+            lim_sfr = [np.nanmin([true_sfr, pred_sfr]), np.nanmax([true_sfr, pred_sfr])]
+
+            axes[0].scatter(true_mass, pred_mass, s=8, alpha=0.5, color="tab:blue")
+            axes[0].plot(lim_mass, lim_mass, "k--", lw=1)
+            axes[0].set_xlabel("True logM")
+            axes[0].set_ylabel("Inferred logM")
+            axes[0].set_title(f"logM R2={mass_r2:.3f}")
+            axes[0].set_xlim(lim_mass)
+            axes[0].set_ylim(lim_mass)
+
+            axes[1].scatter(true_sfr, pred_sfr, s=8, alpha=0.5, color="tab:orange")
+            axes[1].plot(lim_sfr, lim_sfr, "k--", lw=1)
+            axes[1].set_xlabel("True logSFR")
+            axes[1].set_ylabel("Inferred logSFR")
+            axes[1].set_title(f"logSFR R2={sfr_r2:.3f}")
+            axes[1].set_xlim(lim_sfr)
+            axes[1].set_ylim(lim_sfr)
+
+            plt.suptitle(f"SNR>={snr_min}, Nbands>={n_bands_min} (n={len(idx)})")
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plot_name = outdir / f"scatter_logM_logSFR_snr{snr_min}_nbands{n_bands_min}.png"
+            plt.savefig(plot_name)
+            plt.close(fig)
+            plot_grid[(snr_min, n_bands_min)] = plot_name
 
             print(
                 f"snr>={snr_min:.1f}, n_bands>={n_bands_min}: "
                 f"n={row['n_used']}, dM_med={row['mass_median_delta']:+.3f}, "
-                f"dM_NMAD={row['mass_nmad']:.3f}, corr(dM,z)={row['corr_deltaM_z']:+.3f}"
+                f"dM_NMAD={row['mass_nmad']:.3f}, corr(dM,z)={row['corr_deltaM_z']:+.3f}, "
+                f"R2_M={mass_r2:.3f}, R2_SFR={sfr_r2:.3f}"
             )
 
+
     rows_sorted = sorted(rows, key=lambda r: (r["snr_min"], r["n_bands_min"]))
+
 
     csv_file = outdir / "selection_sweep_summary.csv"
     headers = [
@@ -380,7 +425,10 @@ def main():
         "sfr_median_delta",
         "sfr_nmad",
         "corr_deltaM_z",
+        "mass_r2",
+        "sfr_r2",
     ]
+
 
     with open(csv_file, "w", encoding="utf-8") as f:
         f.write(",".join(headers) + "\n")
@@ -394,12 +442,58 @@ def main():
                     vals.append(str(v))
             f.write(",".join(vals) + "\n")
 
+    # Optionally, plot a summary grid of R2 for logM and logSFR
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        snr_vals = sorted(set(r["snr_min"] for r in rows_sorted))
+        nbands_vals = sorted(set(r["n_bands_min"] for r in rows_sorted))
+        r2_mass = np.full((len(snr_vals), len(nbands_vals)), np.nan)
+        r2_sfr = np.full((len(snr_vals), len(nbands_vals)), np.nan)
+        for r in rows_sorted:
+            i = snr_vals.index(r["snr_min"])
+            j = nbands_vals.index(r["n_bands_min"])
+            r2_mass[i, j] = r["mass_r2"]
+            r2_sfr[i, j] = r["sfr_r2"]
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        im0 = axes[0].imshow(r2_mass, origin="lower", aspect="auto", vmin=0, vmax=1)
+        axes[0].set_xticks(np.arange(len(nbands_vals)))
+        axes[0].set_xticklabels(nbands_vals)
+        axes[0].set_yticks(np.arange(len(snr_vals)))
+        axes[0].set_yticklabels(snr_vals)
+        axes[0].set_xlabel("n_bands_min")
+        axes[0].set_ylabel("snr_min")
+        axes[0].set_title("logM R2")
+        fig.colorbar(im0, ax=axes[0])
+
+        im1 = axes[1].imshow(r2_sfr, origin="lower", aspect="auto", vmin=0, vmax=1)
+        axes[1].set_xticks(np.arange(len(nbands_vals)))
+        axes[1].set_xticklabels(nbands_vals)
+        axes[1].set_yticks(np.arange(len(snr_vals)))
+        axes[1].set_yticklabels(snr_vals)
+        axes[1].set_xlabel("n_bands_min")
+        axes[1].set_ylabel("snr_min")
+        axes[1].set_title("logSFR R2")
+        fig.colorbar(im1, ax=axes[1])
+
+        plt.suptitle("R2 summary for logM and logSFR")
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(outdir / "r2_summary_grid.png")
+        plt.close(fig)
+    except Exception as e:
+        print(f"Could not plot R2 summary grid: {e}")
+
+
     npz_file = outdir / "selection_sweep_summary.npz"
     np.savez(npz_file, rows=np.array(rows_sorted, dtype=object))
 
     print("\nSaved outputs:")
     print(f"  {csv_file}")
     print(f"  {npz_file}")
+    print(f"  Scatter plots for each grid cell in {outdir}")
+    print(f"  R2 summary grid: {outdir / 'r2_summary_grid.png'}")
 
 
 if __name__ == "__main__":
