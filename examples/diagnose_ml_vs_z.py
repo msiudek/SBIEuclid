@@ -63,9 +63,92 @@ def main() -> None:
         sed_flux = np.asarray(group['"sed"'][:], dtype=float)  # microJy
         met = np.asarray(group['"met"'][:], dtype=float)
         sfh_tuple = np.asarray(group['"sfh_tuple"'][:], dtype=float)
+
+    # --- M/L vs log(sSFR) for metallicity bins (if SFR available) ---
+    if '"sfr"' in group:
+        sfr = np.asarray(group['"sfr"'][:], dtype=float)
+        # sSFR = SFR / Mstar (both in linear units)
+        # log(sSFR) = log(SFR) - log(Mstar)
+        # Recompute h_lum for this block to ensure it's defined
+        h_flux = sed_flux[:, BAND_MAP["NISP-H"]]
+        h_flux_cgs = h_flux * 1e-29
+        cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+        z_nonneg = np.clip(zval, 0.0, None)
+        d_l_cm = cosmo.luminosity_distance(z_nonneg).to("cm").value
+        area_factor = 4.0 * np.pi * d_l_cm**2
+        h_lum = h_flux_cgs * area_factor
+        ml_h = logm - np.log10(h_lum)
+        valid_ssfr = (
+            np.isfinite(sfr)
+            & np.isfinite(logm)
+            & (sfr > 0)
+            & (logm > 0)
+            & np.isfinite(ml_h)
+            & np.isfinite(met)
+            & (h_lum > 0)
+        )
+        log_ssfr = np.log10(sfr[valid_ssfr]) - logm[valid_ssfr]
+        ml_h_ssfr = ml_h[valid_ssfr]
+        met_ssfr = met[valid_ssfr]
+        # Use same metallicity bins as before
+        met_bins_ssfr = np.percentile(met_ssfr, [0, 33, 66, 100])
+        met_bin_labels_ssfr = [f"[{met_bins_ssfr[i]:.2f}, {met_bins_ssfr[i+1]:.2f})" for i in range(len(met_bins_ssfr)-1)]
+        cmaps = ["Blues", "Oranges", "Greens"]
+        plt.figure(figsize=(7, 5))
+        hexbin_handles = []
+        for i in range(3):
+            sel = (
+                (met_ssfr >= met_bins_ssfr[i])
+                & (met_ssfr < met_bins_ssfr[i+1] if i < 2 else met_ssfr <= met_bins_ssfr[i+1])
+            )
+            if np.sum(sel) < 10:
+                continue
+            hb = plt.hexbin(
+                log_ssfr[sel],
+                ml_h_ssfr[sel],
+                gridsize=50,
+                bins="log",
+                mincnt=1,
+                cmap=cmaps[i],
+                alpha=0.5
+            )
+            hexbin_handles.append((hb, f"[Z] {met_bin_labels_ssfr[i]} (N={np.sum(sel)})"))
+        plt.xlabel("log10(sSFR [1/yr])")
+        plt.ylabel("log10(M*/L_H)")
+        plt.title("Mock atlas: log(M/L_H) vs log(sSFR) for metallicity bins")
+        from matplotlib.patches import Patch
+        legend_patches = [Patch(color=plt.get_cmap(cmaps[i])(0.7), label=hexbin_handles[i][1]) for i in range(len(hexbin_handles))]
+        plt.legend(handles=legend_patches)
+        plt.colorbar(label="log10(N)")
+        plt.tight_layout()
+        out_plot_ssfr_met = outdir / "diagnose_ml_vs_logssfr_metallicity.png"
+        plt.savefig(out_plot_ssfr_met, dpi=170)
+        plt.close()
+        print(f"  M/L vs log(sSFR) metallicity plot: {out_plot_ssfr_met}")
+    args = build_parser().parse_args()
+    root = Path(__file__).resolve().parents[1]
+    atlas_file = root / args.atlas_file if not Path(args.atlas_file).is_absolute() else Path(args.atlas_file)
+    outdir = root / args.outdir if not Path(args.outdir).is_absolute() else Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(atlas_file, "r") as file_handle:
+        group = file_handle["data"]
+        logm = np.asarray(group['"mstar"'][:], dtype=float)
+        zval = np.asarray(group['"zval"'][:], dtype=float)
+        sed_flux = np.asarray(group['"sed"'][:], dtype=float)  # microJy
+        met = np.asarray(group['"met"'][:], dtype=float)
+        sfh_tuple = np.asarray(group['"sfh_tuple"'][:], dtype=float)
     # --- Fixed: M/L vs log(age[Gyr]) for metallicity bins ---
     # Use age of the universe at z as the stellar population age
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)  # Ensure cosmo is defined here
     age_gyr = cosmo.age(zval).value  # in Gyr
+    # Recompute h_lum for this block to ensure it's defined
+    h_flux = sed_flux[:, BAND_MAP["NISP-H"]]
+    h_flux_cgs = h_flux * 1e-29
+    z_nonneg = np.clip(zval, 0.0, None)
+    d_l_cm = cosmo.luminosity_distance(z_nonneg).to("cm").value
+    area_factor = 4.0 * np.pi * d_l_cm**2
+    h_lum = h_flux_cgs * area_factor
     ml_h = logm - np.log10(h_lum)
     valid_age = (
         np.isfinite(ml_h)

@@ -5,19 +5,15 @@ from astropy.table import Table
 
 # Load inference results
 inference = np.load('sbi-logs/inference_cosmosweb_v5.1/inference_results.npz')
-sel = inference['selected_indices']  # zero-based row indices into matched catalog
+euclid_id = inference['euclid_id']  # zero-based row indices into matched catalog
 logM_sbi = inference['logM_sbi']
 logSFR_sbi = inference['logSFR_sbi']
 logM_cosmosweb = inference['logM_cosmosweb']
 logSFR_cosmosweb = inference['logSFR_cosmosweb']
 
-# Load the matched catalog to get true euclid_idx values
-cat = Table.read('obs/obs_properties/COSMOS-Web/matched_euclid_cosmosweb.fits')
-euclid_idx = np.array(cat['euclid_idx'])[sel]
-
 # Build DataFrame
 out = pd.DataFrame({
-    'index': sel,
+    'euclid_id': euclid_id,
     'logM_sbi': logM_sbi,
     'logSFR_sbi': logSFR_sbi,
     'logM_cosmosweb': logM_cosmosweb,
