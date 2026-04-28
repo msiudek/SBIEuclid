@@ -292,15 +292,15 @@ def main():
         ) from exc
 
     # Reference values
-    z_ref    = np.array(cat["zfinal"],   dtype=float)
-    mass_ref = np.array(cat["mass_med"], dtype=float)   # log10(M/Msun)
-    mass_lo  = np.array(cat["mass_l68"], dtype=float)
-    mass_hi  = np.array(cat["mass_u68"], dtype=float)
+    z_ref    = np.array(cat["z_lephare"],   dtype=float)
+    mass_ref = np.array(cat["logM_lephare"], dtype=float)   # log10(M/Msun)
+    mass_lo  = np.array(cat["logM_l68_lephare"], dtype=float)
+    mass_hi  = np.array(cat["logM_u68_lephare"], dtype=float)
 
     # Optional SFR reference columns (names vary across COSMOS-Web exports)
-    sfr_ref_col = _find_first_existing_column(cat, ["sfr_med", "logsfr_med", "sfr", "log_sfr"])
-    sfr_lo_col = _find_first_existing_column(cat, ["sfr_l68", "logsfr_l68", "sfr_lo", "log_sfr_lo"])
-    sfr_hi_col = _find_first_existing_column(cat, ["sfr_u68", "logsfr_u68", "sfr_hi", "log_sfr_hi"])
+    sfr_ref_col = _find_first_existing_column(cat, ["sfr_med", "logsfr_med", "sfr", "logSFR_lephare"])
+    sfr_lo_col = _find_first_existing_column(cat, ["sfr_l68", "logsfr_l68", "sfr_lo", "logSFR_l68_lephare"])
+    sfr_hi_col = _find_first_existing_column(cat, ["sfr_u68", "logsfr_u68", "sfr_hi", "logSFR_u68_lephare"])
 
     if sfr_ref_col is not None:
         sfr_ref = np.array(cat[sfr_ref_col], dtype=float)

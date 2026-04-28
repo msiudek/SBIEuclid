@@ -74,7 +74,11 @@ out['euclid_id'] = euclid_m['object_id']
 out['z_lephare'] = cosweb_m['zfinal']
 out['type_lephare'] = cosweb_m['type']
 out['logM_lephare'] = cosweb_m['mass_med']
+out['logM_l68_lephare'] = cosweb_m['mass_l68']
+out['logM_u68_lephare'] = cosweb_m['mass_u68']
 out['logSFR_lephare'] = cosweb_m['sfr_med']
+out['logSFR_l68_lephare'] = cosweb_m['sfr_l68']
+out['logSFR_u68_lephare'] = cosweb_m['sfr_u68']
 
 # CIGALE
 out['logM_cigale'] = np.log10(cosweb_m['mass'])
