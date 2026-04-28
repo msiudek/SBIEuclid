@@ -292,6 +292,7 @@ def main():
         ) from exc
 
     # Reference values
+    euclid_id    = np.array(cat["euclid_id"],   dtype=float)
     z_ref    = np.array(cat["z_lephare"],   dtype=float)
     mass_ref = np.array(cat["logM_lephare"], dtype=float)   # log10(M/Msun)
     mass_lo  = np.array(cat["logM_l68_lephare"], dtype=float)
@@ -354,6 +355,7 @@ def main():
     sel = np.sort(sel)
     print(f"  Selected {len(sel)} galaxies for inference")
 
+    id_sel      = euclid_id[sel]
     flux_sel    = flux[sel]
     fluxerr_sel = fluxerr[sel]
     z_sel       = z_ref[sel]
@@ -560,6 +562,7 @@ def main():
     # ------------------------------------------------------------------
     result_file = outdir / "inference_results.npz"
     np.savez(result_file,
+            euclid_id=id_sel,
              logM_sbi=logM_med, logM_sbi_lo=logM_lo, logM_sbi_hi=logM_hi,
              logSFR_sbi=logSFR_med,
              logM_cosmosweb=mass_sel,

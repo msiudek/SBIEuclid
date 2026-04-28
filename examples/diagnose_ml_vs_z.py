@@ -61,6 +61,54 @@ def main() -> None:
         logm = np.asarray(group['"mstar"'][:], dtype=float)
         zval = np.asarray(group['"zval"'][:], dtype=float)
         sed_flux = np.asarray(group['"sed"'][:], dtype=float)  # microJy
+        met = np.asarray(group['"met"'][:], dtype=float)
+        sfh_tuple = np.asarray(group['"sfh_tuple"'][:], dtype=float)
+    # --- Fixed: M/L vs log(age[Gyr]) for metallicity bins ---
+    # Use age of the universe at z as the stellar population age
+    age_gyr = cosmo.age(zval).value  # in Gyr
+    ml_h = logm - np.log10(h_lum)
+    valid_age = (
+        np.isfinite(ml_h)
+        & np.isfinite(age_gyr)
+        & np.isfinite(met)
+        & (h_lum > 0)
+        & (age_gyr > 0)
+    )
+    # Define metallicity bins (3 bins: low, mid, high)
+    met_bins = np.percentile(met[valid_age], [0, 33, 66, 100])
+    met_bin_labels = [f"[{met_bins[i]:.2f}, {met_bins[i+1]:.2f})" for i in range(len(met_bins)-1)]
+    cmaps = ["Blues", "Oranges", "Greens"]
+    plt.figure(figsize=(7, 5))
+    hexbin_handles = []
+    for i in range(3):
+        sel = (
+            valid_age
+            & (met >= met_bins[i])
+            & (met < met_bins[i+1] if i < 2 else met <= met_bins[i+1])
+        )
+        if np.sum(sel) < 10:
+            continue
+        hb = plt.hexbin(
+            np.log10(age_gyr[sel]),
+            ml_h[sel],
+            gridsize=50,
+            bins="log",
+            mincnt=1,
+            cmap=cmaps[i],
+            alpha=0.5
+        )
+        hexbin_handles.append((hb, f"[Z] {met_bin_labels[i]} (N={np.sum(sel)})"))
+    plt.xlabel("log10(age [Gyr])")
+    plt.ylabel("log10(M*/L_H)")
+    plt.title("Mock atlas: log(M/L_H) vs log(age) for metallicity bins\n(age = cosmic time at z)")
+    from matplotlib.patches import Patch
+    legend_patches = [Patch(color=plt.get_cmap(cmaps[i])(0.7), label=hexbin_handles[i][1]) for i in range(len(hexbin_handles))]
+    plt.legend(handles=legend_patches)
+    plt.colorbar(label="log10(N)")
+    plt.tight_layout()
+    out_plot_age_met = outdir / "diagnose_ml_vs_logage_metallicity.png"
+    plt.savefig(out_plot_age_met, dpi=170)
+    plt.close()
 
     print(f"atlas: {atlas_file}")
     print(f"N total: {len(logm)}")
@@ -210,6 +258,7 @@ def main() -> None:
     print(f"  color plot (Y-J): {out_plot_color_yj}")
     print(f"  color plot (J-H): {out_plot_color_jh}")
     print(f"  sSFR proxy plot (H-VIS): {out_plot_ssfr}")
+    print(f"  M/L vs log(age) metallicity plot: {out_plot_age_met}")
 
 
 if __name__ == "__main__":
