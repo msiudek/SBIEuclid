@@ -172,8 +172,7 @@ NONDET_MAG = 99.0
 SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
-PATCH_ID = 98
-MATCHED_CATALOG = OBS_DIR / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"
+PATCH_ID = 65879
 
 _FILTER_META = load_filter_metadata("filters_to_use.dat", filt_dir=str(OBS_DIR))
 FILTER_SHORT = [m["short"] for m in _FILTER_META]
@@ -184,7 +183,7 @@ def load_real_mag_for_mock_match(phot_type):
     """Load real detected magnitudes (filter-major arrays) for prior matching."""
     from astropy.table import Table
 
-    fits_path = OBS_DIR / "COSMOS_DEEP.fits"
+    fits_path = OBS_DIR / "COSMOS_DEEP_PHZ.fits"
     cat = Table.read(fits_path)
 
     patch_col = cat["patch_id_list"]

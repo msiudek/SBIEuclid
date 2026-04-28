@@ -100,6 +100,7 @@ def main() -> None:
         for band_name, slope, intercept, npts in rows:
             handle.write(f"{band_name}\t{slope:.6f}\t{intercept:.6f}\t{npts}\n")
 
+
     # Plot for NISP-H (requested quick diagnostic)
     h_flux = sed_flux[:, BAND_MAP["NISP-H"]]
     h_flux_cgs = h_flux * 1e-29
@@ -131,11 +132,84 @@ def main() -> None:
     plt.savefig(out_plot, dpi=170)
     plt.close()
 
+    # --- New: M/L vs colors ---
+    # Use (Y-J) and (J-H) as color proxies
+    y_flux = sed_flux[:, BAND_MAP["NISP-Y"]]
+    j_flux = sed_flux[:, BAND_MAP["NISP-J"]]
+    h_flux = sed_flux[:, BAND_MAP["NISP-H"]]
+    # Convert to AB mag: m_AB = -2.5*log10(f_ujy) + 23.9
+    def abmag(f_ujy):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return -2.5 * np.log10(f_ujy) + 23.9
+
+    y_mag = abmag(y_flux)
+    j_mag = abmag(j_flux)
+    h_mag = abmag(h_flux)
+    color_yj = y_mag - j_mag
+    color_jh = j_mag - h_mag
+
+    # M/L_H as before
+    ml_h = logm - np.log10(h_lum)
+    valid_color = (
+        np.isfinite(ml_h)
+        & np.isfinite(color_yj)
+        & np.isfinite(color_jh)
+        & (h_lum > 0)
+    )
+
+    # Plot M/L_H vs (Y-J)
+    plt.figure(figsize=(7, 5))
+    plt.hexbin(color_yj[valid_color], ml_h[valid_color], gridsize=60, bins="log", mincnt=1)
+    plt.xlabel("Y - J [mag]")
+    plt.ylabel("log10(M*/L_H)")
+    plt.title("Mock atlas: log(M/L_H) vs (Y-J)")
+    plt.colorbar(label="log10(N)")
+    plt.tight_layout()
+    out_plot_color_yj = outdir / "diagnose_ml_vs_color_YJ.png"
+    plt.savefig(out_plot_color_yj, dpi=170)
+    plt.close()
+
+    # Plot M/L_H vs (J-H)
+    plt.figure(figsize=(7, 5))
+    plt.hexbin(color_jh[valid_color], ml_h[valid_color], gridsize=60, bins="log", mincnt=1)
+    plt.xlabel("J - H [mag]")
+    plt.ylabel("log10(M*/L_H)")
+    plt.title("Mock atlas: log(M/L_H) vs (J-H)")
+    plt.colorbar(label="log10(N)")
+    plt.tight_layout()
+    out_plot_color_jh = outdir / "diagnose_ml_vs_color_JH.png"
+    plt.savefig(out_plot_color_jh, dpi=170)
+    plt.close()
+
+    # --- New: M/L vs sSFR proxy ---
+    # Use (H - VIS) color as a crude sSFR proxy (bluer = higher sSFR)
+    vis_flux = sed_flux[:, BAND_MAP["VIS"]]
+    vis_mag = abmag(vis_flux)
+    color_hvis = h_mag - vis_mag
+    valid_ssfr = (
+        np.isfinite(ml_h)
+        & np.isfinite(color_hvis)
+        & (h_lum > 0)
+    )
+    plt.figure(figsize=(7, 5))
+    plt.hexbin(color_hvis[valid_ssfr], ml_h[valid_ssfr], gridsize=60, bins="log", mincnt=1)
+    plt.xlabel("H - VIS [mag] (sSFR proxy)")
+    plt.ylabel("log10(M*/L_H)")
+    plt.title("Mock atlas: log(M/L_H) vs (H-VIS) [sSFR proxy]")
+    plt.colorbar(label="log10(N)")
+    plt.tight_layout()
+    out_plot_ssfr = outdir / "diagnose_ml_vs_sSFRproxy_H_VIS.png"
+    plt.savefig(out_plot_ssfr, dpi=170)
+    plt.close()
+
     print("\nM/L vs z diagnostic complete")
     for band_name, slope, intercept, npts in rows:
         print(f"  {band_name}: slope(logM/L vs z) = {slope:.4f}  (N={npts})")
     print(f"  plot: {out_plot}")
     print(f"  table: {out_txt}")
+    print(f"  color plot (Y-J): {out_plot_color_yj}")
+    print(f"  color plot (J-H): {out_plot_color_jh}")
+    print(f"  sSFR proxy plot (H-VIS): {out_plot_ssfr}")
 
 
 if __name__ == "__main__":

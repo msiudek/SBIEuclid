@@ -82,9 +82,8 @@ NONDET_MAG = 99.0
 SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
-CATALOG_FILE = "obs/obs_properties/COSMOS_DEEP.fits"
-MATCHED_CATALOG_FILE = "obs/obs_properties/COSMOS-Web/matched_euclid_cosmosweb.fits"
-PATCH_ID = 98
+CATALOG_FILE = "obs/obs_properties/COSMOS_DEEP_PHZ.fits"
+PATCH_ID = 65879
 AB_ZEROPOINT_JY = 3631.0
 AB_ZEROPOINT_UJY = 3631e6
 LN10 = np.log(10.0)
@@ -678,7 +677,6 @@ def build_validation_model(args, obs_dir, library_dir):
     model.atlas_path = str(library_dir) + "/"
     model.model_path = str(library_dir) + "/"
     model.atlas_name = "atlas_obs_euclid_north_validate"
-    model.model_name = "post_obs_euclid_north_validate.pkl"
     model.n_simulation = args.n_sim
     model.parametric = True
     model.both_masses = True
@@ -713,6 +711,43 @@ def load_or_simulate_model(model, args, outdir):
 
 
 def save_validation_plots(real_data, mock_data, model, outdir):
+    # --- New: Flux ratio vs magnitude and flux-flux scatter plots ---
+    for fi, band in enumerate(FILTER_SHORT):
+        real_flux = real_data["flux"][fi]
+        mock_mag_noisy = mock_data["mag"][fi]
+        mock_flux = mag_to_flux_ujy(mock_mag_noisy)
+        real_mag = real_data["mag"][fi]
+        # Only use detected objects for both real and mock
+        real_ok = np.isfinite(real_flux) & (real_flux > 0) & np.isfinite(real_mag)
+        mock_ok = np.isfinite(mock_flux) & (mock_mag_noisy < NONDET_MAG - 0.5)
+        if np.any(real_ok) and np.any(mock_ok):
+            mag_bins = np.linspace(MAG_BRIGHT, MAG_FAINT, 40)
+            plt.figure(figsize=(7, 5))
+            bin_centers = 0.5 * (mag_bins[:-1] + mag_bins[1:])
+            median_real_flux = np.full_like(bin_centers, np.nan)
+            median_mock_flux = np.full_like(bin_centers, np.nan)
+            ratio = np.full_like(bin_centers, np.nan)
+            for i, (lo, hi) in enumerate(zip(mag_bins[:-1], mag_bins[1:])):
+                in_bin_real = real_ok & (real_mag >= lo) & (real_mag < hi)
+                in_bin_mock = mock_ok & (mock_mag_noisy >= lo) & (mock_mag_noisy < hi)
+                if np.any(in_bin_real):
+                    median_real_flux[i] = np.nanmedian(real_flux[in_bin_real])
+                if np.any(in_bin_mock):
+                    median_mock_flux[i] = np.nanmedian(mock_flux[in_bin_mock])
+                if np.isfinite(median_real_flux[i]) and np.isfinite(median_mock_flux[i]) and median_real_flux[i] > 0:
+                    ratio[i] = median_mock_flux[i] / median_real_flux[i]
+            plt.plot(bin_centers, ratio, marker='o', linestyle='-', color='navy')
+            plt.xlabel(f"{band} magnitude")
+            plt.ylabel("Median mock/real flux ratio")
+            plt.title(f"Flux ratio vs magnitude: {band}")
+            plt.ylim(0, np.nanmax(ratio)*1.2 if np.nanmax(ratio) > 0 else 2)
+            plt.grid(True, alpha=0.3)
+            out_flux_ratio = outdir / f"flux_ratio_vs_mag_{band.replace('-', '_')}.png"
+            plt.tight_layout()
+            plt.savefig(out_flux_ratio, dpi=170)
+            plt.close()
+
+            # Removed flux–flux scatter/hexbin plot as requested
     """Generate and save all validation plots."""
     def plot_sigma_model_curve(fi):
         if getattr(model, "noise_sigma_mag_params", None) is None:

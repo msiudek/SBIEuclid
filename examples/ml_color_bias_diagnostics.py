@@ -25,11 +25,13 @@ INFERDIR = Path("sbi-logs/inference_cosmosweb_v5.0")
 inference = np.load(INFERDIR / "inference_results.npz")
 
 
+
 # Use selection indices to extract photometry for the correct galaxies
 sel = inference["selected_indices"]
 logM_SBI = inference["logM_sbi"]
 logM_CWeb = inference["logM_cosmosweb"]
 z = inference["z"]
+
 
 
 
@@ -114,4 +116,77 @@ plt.ylabel(r"$\Delta \log M$")
 plt.title(r"$\Delta \log M$ vs z")
 plt.savefig(LOGDIR / "delta_logM_vs_z.png")
 
+# --- Additional plots: Δlog(M/L) vs Av, sSFR, metallicity ---
+extra_keys = inference.files
+
+if "Av" in extra_keys:
+    Av = inference["Av"]
+    plt.figure()
+    plt.scatter(Av, delta_logML, alpha=0.5)
+    plt.xlabel("A_v (SBI)")
+    plt.ylabel(r"$\Delta \log(M/L)$ (SBI - CWeb)")
+    plt.title(r"$\Delta \log(M/L)$ vs $A_v$")
+    plt.savefig(LOGDIR / "delta_logML_vs_Av.png")
+
+if "log_sSFR" in extra_keys:
+    log_sSFR = inference["log_sSFR"]
+    plt.figure()
+    plt.scatter(log_sSFR, delta_logML, alpha=0.5)
+    plt.xlabel("log(sSFR) (SBI)")
+    plt.ylabel(r"$\Delta \log(M/L)$ (SBI - CWeb)")
+    plt.title(r"$\Delta \log(M/L)$ vs log(sSFR)")
+    plt.savefig(LOGDIR / "delta_logML_vs_log_sSFR.png")
+
+if "metallicity" in extra_keys:
+    metallicity = inference["metallicity"]
+    plt.figure()
+    plt.scatter(metallicity, delta_logML, alpha=0.5)
+    plt.xlabel("[M/H] (SBI)")
+    plt.ylabel(r"$\Delta \log(M/L)$ (SBI - CWeb)")
+    plt.title(r"$\Delta \log(M/L)$ vs [M/H]")
+    plt.savefig(LOGDIR / "delta_logML_vs_metallicity.png")
+
 print("Plots saved to", LOGDIR)
+
+
+# --- Additional plots: Δlog(M/L) vs median sSFR, Av, [M/H] from posterior samples ---
+posteriors = inference["posteriors"]  # shape: (n_gal, n_samples, n_params)
+
+# Check parameter order: [0]=logM*, [1]=logSFR, [2]=Av, [3]=[M/H] (if available)
+logM_samples = posteriors[:, :, 0]
+logSFR_samples = posteriors[:, :, 1]
+
+# Compute sSFR = SFR/Mstar = 10**(logSFR-logM)
+log_sSFR_samples = logSFR_samples - logM_samples
+median_log_sSFR = np.nanmedian(log_sSFR_samples, axis=1)
+
+plt.figure()
+plt.scatter(median_log_sSFR, delta_logML, alpha=0.5)
+plt.xlabel(r"median log(sSFR) (SBI)")
+plt.ylabel(r"Δlog(M/L) (SBI - CWeb)")
+plt.title(r"Δlog(M/L) vs median log(sSFR)")
+plt.savefig(LOGDIR / "delta_logML_vs_median_log_sSFR.png")
+plt.close()
+
+# Av and [M/H] if available
+if posteriors.shape[2] > 2:
+    Av_samples = posteriors[:, :, 2]
+    median_Av = np.nanmedian(Av_samples, axis=1)
+    plt.figure()
+    plt.scatter(median_Av, delta_logML, alpha=0.5)
+    plt.xlabel(r"median Av (SBI)")
+    plt.ylabel(r"Δlog(M/L) (SBI - CWeb)")
+    plt.title(r"Δlog(M/L) vs median Av")
+    plt.savefig(LOGDIR / "delta_logML_vs_median_Av.png")
+    plt.close()
+
+if posteriors.shape[2] > 3:
+    Z_samples = posteriors[:, :, 3]
+    median_Z = np.nanmedian(Z_samples, axis=1)
+    plt.figure()
+    plt.scatter(median_Z, delta_logML, alpha=0.5)
+    plt.xlabel(r"median [M/H] (SBI)")
+    plt.ylabel(r"Δlog(M/L) (SBI - CWeb)")
+    plt.title(r"Δlog(M/L) vs median [M/H]")
+    plt.savefig(LOGDIR / "delta_logML_vs_median_Z.png")
+    plt.close()
