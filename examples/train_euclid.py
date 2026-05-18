@@ -371,14 +371,6 @@ sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
 
 if args.mock_match != "none":
-    if args.observation_space == "flux":
-        print(
-            "    Flux-space mode: disabling mag-based mock matching to keep "
-            "a strict flux-only pipeline."
-        )
-        args.mock_match = "none"
-
-if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
     real_mag = load_real_mag_for_mock_match(phot_type=args.phot_type)
     if args.observation_space == "flux":
