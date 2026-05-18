@@ -435,6 +435,7 @@ def main():
     qphi = None
     expected_ctx = obs.shape[1] + 1
     probe_errors = []
+    posterior_source = None
 
     def _supports_obs_plus_z(posterior):
         try:
@@ -447,43 +448,58 @@ def main():
         except Exception as exc:
             return False, str(exc)
 
-    # Prefer rebuilding posterior from SNPE object when available.
-    # This is more robust than relying on a pickled posterior object and
-    # ensures context dimensionality (photometry vs photometry+z) is consistent.
-    try:
-        with open(anpe_file, "rb") as f:
-            anpe = pickle.load(f)
-        try:
-            qphi = anpe.build_posterior(sample_with=args.sample_with)
-            print(f"Using posterior sampler backend: {args.sample_with}")
-        except TypeError:
-            qphi = anpe.build_posterior()
-            print(
-                "WARNING: current sbi version does not support "
-                "build_posterior(sample_with=...). Using default posterior backend."
-            )
+    with open(model_file, "rb") as f:
+        qphi_model = pickle.load(f)
 
-        ok, err = _supports_obs_plus_z(qphi)
-        if not ok:
-            probe_errors.append(f"anpe posterior incompatible with obs+z context ({err})")
-            qphi = None
-    except Exception as exc:
+    # In sbi>=0.23, anpe.build_posterior(sample_with='rejection') requires
+    # passing an explicit prior. For rejection mode, use the pickled posterior
+    # directly to keep behavior stable and avoid false warning/fallback noise.
+    if args.sample_with == "rejection":
+        qphi = qphi_model
+        posterior_source = "model-pickle"
         print(
-            f"WARNING: could not load/rebuild posterior from {anpe_file} ({exc}). "
-            "Falling back to pickled posterior object."
+            "Rejection backend requested: using pickled posterior object directly; "
+            "skipping anpe.build_posterior(sample_with='rejection')."
         )
-        probe_errors.append(f"anpe load/rebuild failed ({exc})")
+    else:
+        # Prefer rebuilding posterior from SNPE object when available.
+        # This is more robust than relying on a pickled posterior object and
+        # ensures context dimensionality (photometry vs photometry+z) is consistent.
+        try:
+            with open(anpe_file, "rb") as f:
+                anpe = pickle.load(f)
+            try:
+                qphi = anpe.build_posterior(sample_with=args.sample_with)
+                posterior_source = "anpe-rebuild"
+                print(f"Using posterior sampler backend: {args.sample_with}")
+            except TypeError:
+                qphi = anpe.build_posterior()
+                posterior_source = "anpe-rebuild-default"
+                print(
+                    "WARNING: current sbi version does not support "
+                    "build_posterior(sample_with=...). Using default posterior backend."
+                )
 
-    if qphi is None:
-        with open(model_file, "rb") as f:
-            qphi_model = pickle.load(f)
+            ok, err = _supports_obs_plus_z(qphi)
+            if not ok:
+                probe_errors.append(f"anpe posterior incompatible with obs+z context ({err})")
+                qphi = None
+                posterior_source = None
+        except Exception as exc:
+            print(
+                f"WARNING: could not load/rebuild posterior from {anpe_file} ({exc}). "
+                "Falling back to pickled posterior object."
+            )
+            probe_errors.append(f"anpe load/rebuild failed ({exc})")
 
-        ok, err = _supports_obs_plus_z(qphi_model)
-        if ok:
-            qphi = qphi_model
-            print("Using pickled posterior object from model file.")
-        else:
-            probe_errors.append(f"model posterior incompatible with obs+z context ({err})")
+        if qphi is None:
+            ok, err = _supports_obs_plus_z(qphi_model)
+            if ok:
+                qphi = qphi_model
+                posterior_source = "model-pickle"
+                print("Using pickled posterior object from model file.")
+            else:
+                probe_errors.append(f"model posterior incompatible with obs+z context ({err})")
 
     # Ensure at least one candidate posterior supports conditioning on catalog redshift.
     if qphi is None:
@@ -496,6 +512,8 @@ def main():
             f"Model: {sx.model_name}; expected context in this script: {expected_ctx}; "
             f"checked anpe file: {anpe_file}; probe details: {detail}."
         )
+
+    print(f"Posterior source: {posterior_source}")
 
     print(
         f"Running inference on {len(sel)} galaxies × {args.n_samples} samples "
