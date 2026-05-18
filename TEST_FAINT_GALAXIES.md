@@ -9,9 +9,14 @@ python examples/inference_cosmosweb.py \
     --mag-band NISP-Y \
     --mag-min 27.0 \
     --mag-max 28.0 \
+    --model-name model_euclid_v9.0.pkl \
+    --phot-type templfit \
     --sample-with rejection \
     --observation-space flux \
     --n-samples 200 \
+    --device cuda \
+    --n-bands-min 7 \
+    --snr-min 3 \
     --outdir sbi-logs/test_faint_nispy_27_28
 
 # Test 2: Compare with bright galaxies (mag 22-24)
@@ -20,9 +25,14 @@ python examples/inference_cosmosweb.py \
     --mag-band NISP-Y \
     --mag-min 22.0 \
     --mag-max 24.0 \
+    --model-name model_euclid_v9.0.pkl \
+    --phot-type templfit \
     --sample-with rejection \
     --observation-space flux \
     --n-samples 200 \
+    --device cuda \
+    --n-bands-min 7 \
+    --snr-min 3 \
     --outdir sbi-logs/test_bright_nispy_22_24
 ```
 

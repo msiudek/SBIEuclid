@@ -250,7 +250,7 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         target_log_ssfr = None
         if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
             mean_log_ssfr = _mean_log_ssfr(massval, zval)
-            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
+            target_log_ssfr = np.random.normal(mean_log_ssfr, 1.5)
             if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
                 target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
 
