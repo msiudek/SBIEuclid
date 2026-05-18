@@ -350,6 +350,25 @@ sx.load_simulation()
 # --------------------------------------------------
 print("[2/5] Adding observational realism...")
 sx.load_obs_features()
+
+# --------------------------------------------------
+# SNR PRE-SELECTION
+# Keep only galaxies with true-flux SNR >= detection threshold in at least
+# one band.  This mirrors the survey selection function and prevents training
+# on intrinsically undetectable objects, which would otherwise dominate the
+# non-detection class and bias posterior mass estimates (especially at high-z).
+# --------------------------------------------------
+_obs_flux_true = 3631e6 * 10 ** (-0.4 * np.asarray(sx.obs, dtype=float))  # (n, n_filt) μJy
+_sigma_lim = np.maximum(np.asarray(sx.limits, dtype=float), 1e-12)         # (n_filt,) μJy
+_snr_in_band = _obs_flux_true / _sigma_lim[None, :]
+_snr_mask = np.any(_snr_in_band >= sx.snr_threshold, axis=1)
+n_before_snr = len(sx.theta)
+sx.theta = sx.theta[_snr_mask]
+sx.obs   = sx.obs[_snr_mask]
+sx.n_simulation = int(_snr_mask.sum())
+print(f"    SNR pre-selection (SNR>={sx.snr_threshold:.1f} in any band): "
+      f"{sx.n_simulation} / {n_before_snr} galaxies kept")
+
 sx.add_noise_nan_limit_all()
 
 # clean NaNs

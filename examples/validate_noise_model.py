@@ -1002,7 +1002,12 @@ def main():
     _limits_arr = np.load(str(obs_dir / limits_file))
     n_filt_used = model.obs.shape[1]
     sigma_lim_per_filter = np.asarray(_limits_arr[:n_filt_used], dtype=float)  # (n_filt,)
-    bright_in_band = obs_flux > sigma_lim_per_filter[None, :]
+    # Keep only objects with true-flux SNR >= detection threshold in at least
+    # one band.  This matches the survey selection function and prevents
+    # training on intrinsically undetectable galaxies that would bias the
+    # posterior towards non-detections (particularly at high-z).
+    snr_in_band = obs_flux / np.maximum(sigma_lim_per_filter[None, :], 1e-12)
+    bright_in_band = snr_in_band >= SNR_DETECTION_THRESHOLD
     flux_mask = np.any(bright_in_band, axis=1)
     n_before = model.n_simulation
     model.theta = model.theta[flux_mask]
@@ -1012,11 +1017,11 @@ def main():
     lim_txt = ", ".join(f"{x:.4f}" for x in sigma_lim_per_filter)
     kept_txt = ", ".join(str(int(x)) for x in n_kept_per_filter)
     print(
-        f"  sigma_lim mask (any band flux > per-filter sigma_lim): "
+        f"  SNR mask (any band true-flux/sigma_lim >= {SNR_DETECTION_THRESHOLD:.1f}): "
         f"{model.n_simulation} / {n_before} galaxies kept"
     )
     print(f"  per-filter sigma_lim [μJy]: [{lim_txt}]")
-    print(f"  per-filter N(flux > sigma_lim): [{kept_txt}]")
+    print(f"  per-filter N(true SNR >= {SNR_DETECTION_THRESHOLD:.1f}): [{kept_txt}]")
 
     print("[2/3] Applying observational realism...")
     model.load_obs_features()

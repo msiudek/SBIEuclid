@@ -185,17 +185,40 @@ def compute_noise_features(phot_ujy, err_ujy, percentile_cuts, snr_threshold=2.0
     return percentiles, mean_sigma, std_sigma, sigma_samples
 
 
-def compute_background_limits(phot_ujy, err_ujy, snr_threshold=2.0, faint_percentile=20.0):
-    """Estimate 1-sigma background limit from non-detection (low-SNR) regime."""
+def compute_background_limits(phot_ujy, err_ujy, snr_threshold=2.0, faint_percentile=20.0,
+                              depth5_ujy=None):
+    """Return the 1-sigma flux limit per filter.
+
+    When ``depth5_ujy`` is provided (an array of 5σ flux limits in μJy, one
+    per filter), the 1σ limit is simply ``depth5_ujy / 5``.  This is the
+    recommended path: it ties the non-detection error floor directly to the
+    survey's known point-source detection limit, ensuring consistency between
+    training mocks and real observations.
+
+    When ``depth5_ujy`` is None, the limit is estimated empirically from the
+    catalog as the median error of near-threshold (low-SNR) objects.  This
+    fallback tends to underestimate the true depth for template-fit photometry
+    and should only be used when external depth information is unavailable.
+    """
+    if depth5_ujy is not None:
+        depth5_ujy = np.asarray(depth5_ujy, dtype=float)
+        if depth5_ujy.shape[0] != phot_ujy.shape[0]:
+            raise ValueError(
+                f"depth5_ujy length ({depth5_ujy.shape[0]}) must match "
+                f"n_filters ({phot_ujy.shape[0]})"
+            )
+        return depth5_ujy / 5.0
+
+    # --- Empirical fallback (legacy) ---
     valid = np.isfinite(phot_ujy) & np.isfinite(err_ujy) & (phot_ujy > 0) & (err_ujy > 0)
     snr = np.full_like(phot_ujy, np.nan, dtype=float)
     np.divide(phot_ujy, err_ujy, out=snr, where=valid)
-    
+
     limits = np.zeros(phot_ujy.shape[0])
     for i in range(phot_ujy.shape[0]):
         phot_i = phot_ujy[i, valid[i, :]]
-        err_i = err_ujy[i, valid[i, :]]
-        snr_i = snr[i, valid[i, :]]
+        err_i  = err_ujy[i, valid[i, :]]
+        snr_i  = snr[i, valid[i, :]]
 
         if len(phot_i) > 0:
             low_snr_mask = np.isfinite(snr_i) & (snr_i < snr_threshold)
@@ -239,7 +262,22 @@ def main():
         percentiles, mean_sigma, std_sigma, sigma_samples = compute_noise_features(
             phot, err, PERCENTILE_CUTS, SNR_THRESHOLD
         )
-        limits = compute_background_limits(phot, err, SNR_THRESHOLD)
+        # Load 5σ depths if the depth file exists alongside this script,
+        # otherwise fall back to the empirical estimator.
+        _depth_file = os.path.join(os.path.dirname(__file__), 'noise_5sighmadepth.py')
+        _depth5_ujy = None
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location('_depths', _depth_file)
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _order = _mod.order
+            _depth5_ujy = np.array([_mod.mag_to_flux_ujy(_mod.depth5_mag[k]) for k in _order],
+                                   dtype=float)
+            print(f'   Using 5σ depths from noise_5sighmadepth.py for limits.')
+        except Exception as _e:
+            print(f'   WARNING: could not load 5σ depths ({_e}); using empirical fallback.')
+        limits = compute_background_limits(phot, err, SNR_THRESHOLD, depth5_ujy=_depth5_ujy)
 
         np.save(os.path.join(OUT_DIR, f"lam_eff_{prefix}.npy"), lam_eff)
         print(f"   ✓ lam_eff_{prefix}.npy")
