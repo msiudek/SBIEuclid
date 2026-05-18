@@ -139,6 +139,15 @@ def parse_args():
                        "Optional extra inference-side thresholds for no-retraining bias test, "
                        "e.g. --snr-threshold-sweep 3 5 10. Uses same selected galaxies and model."
                    ))
+    p.add_argument("--mag-band",    type=str,   default=None,
+                   help=(
+                       "Filter band for magnitude selection (e.g., 'NISP-Y', 'VIS'). "
+                       "If set, must also set --mag-min and --mag-max to filter galaxies."
+                   ))
+    p.add_argument("--mag-min",     type=float, default=None,
+                   help="Minimum magnitude (inclusive) for --mag-band filter (default: None)")
+    p.add_argument("--mag-max",     type=float, default=None,
+                   help="Maximum magnitude (inclusive) for --mag-band filter (default: None)")
     return p.parse_args()
 
 
@@ -354,6 +363,31 @@ def main():
         sel = rng.choice(good_idx, size=args.n_gal, replace=False)
     sel = np.sort(sel)
     print(f"  Selected {len(sel)} galaxies for inference")
+
+    # Optional magnitude filtering (e.g., faint galaxies in NISP-Y)
+    if args.mag_band is not None:
+        if args.mag_min is None or args.mag_max is None:
+            raise ValueError("--mag-band requires both --mag-min and --mag-max")
+        if args.mag_band not in FILTER_NAMES:
+            raise ValueError(
+                f"--mag-band '{args.mag_band}' not recognized. "
+                f"Available: {', '.join(FILTER_NAMES)}"
+            )
+        mag_band_idx = FILTER_NAMES.index(args.mag_band)
+        mag_values = flux[sel, mag_band_idx].copy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mag_values = np.where(
+                mag_values > 0,
+                -2.5 * np.log10(mag_values / 3631e6),
+                99.0
+            )
+        mag_in_range = (mag_values >= args.mag_min) & (mag_values <= args.mag_max)
+        sel = sel[mag_in_range]
+        print(
+            f"  Applied magnitude filter on {args.mag_band}: "
+            f"{args.mag_min:.2f} <= mag <= {args.mag_max:.2f}"
+        )
+        print(f"  After mag filter: {len(sel)} galaxies remain for inference")
 
     id_sel      = euclid_id[sel]
     flux_sel    = flux[sel]
