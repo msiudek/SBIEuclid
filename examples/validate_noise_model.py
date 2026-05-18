@@ -609,6 +609,36 @@ def get_mock_arrays(model):
     }
 
 
+def downsample_plot_data(data, max_objects, seed=0):
+    """Return a shallow copy of plot data with at most max_objects galaxies."""
+    if max_objects is None or max_objects <= 0:
+        return data
+
+    sample_size = None
+    for value in data.values():
+        if isinstance(value, np.ndarray) and value.ndim >= 2 and value.shape[0] == len(FILTER_SHORT):
+            sample_size = value.shape[1]
+            break
+    if sample_size is None or sample_size <= max_objects:
+        return data
+
+    rng = np.random.default_rng(seed)
+    selected_idx = np.sort(rng.choice(sample_size, size=max_objects, replace=False))
+    out = {}
+    for key, value in data.items():
+        if isinstance(value, np.ndarray):
+            if value.ndim >= 2 and value.shape[0] == len(FILTER_SHORT) and value.shape[1] == sample_size:
+                out[key] = value[:, selected_idx, ...]
+            elif value.ndim == 1 and value.shape[0] == sample_size:
+                out[key] = value[selected_idx]
+            else:
+                out[key] = value
+        else:
+            out[key] = value
+    out["indices"] = selected_idx
+    return out
+
+
 def run_flux_asinh_slope_diagnostic(model, mock_data):
     """Report slope(logM vs asinh(flux/softening)) before/after noise in z bins."""
     if getattr(model, "noise_observation_space", "mag") != "flux":
@@ -917,11 +947,20 @@ def build_parser():
     p.add_argument("--calibrate", action="store_true",
                    help="Apply per-band median magnitude calibration after mock-matching: "
                         "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
+    p.add_argument("--fast", action="store_true",
+                   help="Fast local mode: cap n_sim and downsample heavy plotting inputs")
+    p.add_argument("--max-plot-objects", type=int, default=None,
+                   help="Maximum number of real/mock objects passed to plotting routines")
     return p
 
 
 def main():
     args = build_parser().parse_args()
+
+    if args.fast:
+        args.n_sim = min(args.n_sim, 5000)
+        if args.max_plot_objects is None:
+            args.max_plot_objects = 15000
 
     if args.n_sim < 10000:
         print(f"NOTE: n_sim={args.n_sim} is fine for a local smoke test, but ~10000+ is recommended for validation.")
@@ -957,6 +996,8 @@ def main():
     print(f"  obs space      = {model.noise_observation_space}")
     print(f"  mock match     = {args.mock_match}")
     print(f"  calibrate      = {'on' if args.calibrate else 'off'}")
+    print(f"  fast mode      = {'on' if args.fast else 'off'}")
+    print(f"  max plot objs  = {args.max_plot_objects if args.max_plot_objects is not None else 'all'}")
     print(f"  det SNR cut    = {SNR_DETECTION_THRESHOLD}")
 
     np.random.seed(0)
@@ -1088,7 +1129,15 @@ def main():
         mock_data, delta_mag = apply_mag_calibration(real_data, mock_data)
         print(f"  Per-band calibration applied to {np.sum(np.isfinite(delta_mag))} / {len(FILTER_SHORT)} bands")
 
-    save_validation_plots(real_data, mock_data, model, outdir)
+    plot_real_data = downsample_plot_data(real_data, args.max_plot_objects, seed=0)
+    plot_mock_data = downsample_plot_data(mock_data, args.max_plot_objects, seed=1)
+    if plot_real_data is not real_data or plot_mock_data is not mock_data:
+        print(
+            f"  Plot downsampling enabled: real={plot_real_data['mag'].shape[1]}, "
+            f"mock={plot_mock_data['mag'].shape[1]}"
+        )
+
+    save_validation_plots(plot_real_data, plot_mock_data, model, outdir)
 
 if __name__ == "__main__":
     main()

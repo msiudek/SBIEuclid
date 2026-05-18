@@ -62,11 +62,16 @@ def _ssfr_mass_slope_from_z(zval):
 
 
 def _mean_log_ssfr(logmass, zval):
-    """Mean log-sSFR model: μ(z) + B(z) * (logM - 10)."""
-    mu_z = -10.0 + 2.8 * np.log10(1.0 + max(float(zval), 0.0))
+    z = max(float(zval), 0.0)
+    if z < 1.0:
+        coeff = 1.0   # low-z MS barely evolves
+    elif z < 2.0:
+        coeff = 2.0   # intermediate
+    else:
+        coeff = 2.8   # Schreiber+15, z>2
+    mu_z = -10.0 + coeff * np.log10(1.0 + z)
     b_z = _ssfr_mass_slope_from_z(float(zval))
     return mu_z + b_z * (float(logmass) - 10.0)
-
 
 def _sample_stellar_age(age_universe_gyr, min_frac=0.2, max_frac=0.7):
     """Sample stellar age (Gyr) as a fraction of universe age."""
@@ -250,7 +255,7 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         target_log_ssfr = None
         if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
             mean_log_ssfr = _mean_log_ssfr(massval, zval)
-            target_log_ssfr = np.random.normal(mean_log_ssfr, 1.5)
+            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.7)
             if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
                 target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
 

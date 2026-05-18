@@ -109,6 +109,15 @@ def build_parser():
             "'flux' uses noisy flux+sigma_flux and keeps negative noisy realizations."
         ),
     )
+    p.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help=(
+            "Training and test device. 'auto' uses CUDA when available, otherwise CPU. "
+            "Default: auto"
+        ),
+    )
     return p
 
 
@@ -116,6 +125,13 @@ def build_parser():
 # CONFIG
 # --------------------------------------------------
 args = build_parser().parse_args()
+if args.device == "auto":
+    DEVICE = _DEVICE
+elif args.device == "cuda" and _DEVICE != "cuda":
+    raise RuntimeError("--device cuda requested, but torch.cuda.is_available() is False.")
+else:
+    DEVICE = args.device
+
 N_SIM    = args.n_sim
 N_TEST   = 250
 N_POSTERIOR = 200
@@ -130,8 +146,8 @@ if SMOKE_TEST:
 else:
     N_TRAIN_MAX = N_SIM
 
-print(f"Device: {_DEVICE}")
-if _DEVICE == "cpu":
+print(f"Device: {DEVICE}")
+if DEVICE == "cpu":
     print("WARNING: no GPU detected — training will be slow (~30-90 min for 100k galaxies).")
     print("         Consider running on the server, or set SMOKE_TEST=True for a quick check.")
 
@@ -495,7 +511,7 @@ else:
         nblocks=4,
         nhidden=128,
         epochs_max=20 if SMOKE_TEST else 200,
-        device=_DEVICE,
+        device=DEVICE,
     )
 
 
@@ -508,7 +524,7 @@ posterior = sx.test_performance(
     n_test=min(N_TEST, len(sx.theta)),
     n_samples=N_POSTERIOR,
     return_posterior=True,
-    device=_DEVICE,
+    device=DEVICE,
 )
 
 print("Performance test complete!")
