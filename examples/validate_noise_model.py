@@ -95,7 +95,7 @@ SIMULATION_CONFIG = {
     "ssfr_max": -7.0,
     "z_prior": "flat",
     "z_min": 0.0,
-    "z_max": 5.0,
+    "z_max": 3.5,
     "Z_min": -0.8,
     "Z_max": 0.3,
     "dust_model": "Calzetti",
