@@ -92,7 +92,7 @@ SIMULATION_CONFIG = {
     "mass_max": 11.5,
     "sfr_prior_type": "sSFRlognormal",
     "ssfr_min": -12.5,
-    "ssfr_max": -8.5,
+    "ssfr_max": -7.0,
     "z_prior": "flat",
     "z_min": 0.0,
     "z_max": 5.0,

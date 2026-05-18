@@ -63,7 +63,7 @@ def _ssfr_mass_slope_from_z(zval):
 
 def _mean_log_ssfr(logmass, zval):
     """Mean log-sSFR model: μ(z) + B(z) * (logM - 10)."""
-    mu_z = -10.0 + 0.8 * np.log10(1.0 + max(float(zval), 0.0))
+    mu_z = -10.0 + 2.8 * np.log10(1.0 + max(float(zval), 0.0))
     b_z = _ssfr_mass_slope_from_z(float(zval))
     return mu_z + b_z * (float(logmass) - 10.0)
 
