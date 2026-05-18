@@ -109,6 +109,25 @@ def build_parser():
             "'flux' uses noisy flux+sigma_flux and keeps negative noisy realizations."
         ),
     )
+    p.add_argument(
+        "--train-n-bands-min",
+        type=int,
+        default=0,
+        help=(
+            "Optional training-side observability cut: keep only simulations with at least "
+            "this many bands above --train-snr-min after noise injection. "
+            "Set 0 to disable (default: 0)."
+        ),
+    )
+    p.add_argument(
+        "--train-snr-min",
+        type=float,
+        default=3.0,
+        help=(
+            "SNR threshold used with --train-n-bands-min in flux mode "
+            "(default: 3.0)."
+        ),
+    )
     return p
 
 
@@ -369,6 +388,37 @@ sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
+
+if args.observation_space == "flux":
+    snr_train = np.abs(np.asarray(sx.mag[:, :, 0], dtype=float)) / np.maximum(
+        np.asarray(sx.mag[:, :, 1], dtype=float), 1e-12
+    )
+    n_bands_train = np.sum((snr_train >= float(args.train_snr_min)) & np.isfinite(snr_train), axis=1)
+
+    frac7 = np.mean(n_bands_train >= 7) if len(n_bands_train) > 0 else 0.0
+    frac1 = np.mean(n_bands_train >= 1) if len(n_bands_train) > 0 else 0.0
+    print(
+        f"    Training observability diagnostics (post-noise): "
+        f"fraction with >=1 band SNR>={args.train_snr_min:g}: {frac1:.3f}, "
+        f">=7 bands: {frac7:.3f}"
+    )
+
+    if args.train_n_bands_min > 0:
+        keep = n_bands_train >= int(args.train_n_bands_min)
+        n_before = len(sx.theta)
+        sx.theta = sx.theta[keep]
+        sx.mag = sx.mag[keep]
+        sx.obs = sx.obs[keep]
+        sx.n_simulation = len(sx.theta)
+        print(
+            f"    Applied training observability cut: >= {args.train_n_bands_min} bands "
+            f"with SNR>={args.train_snr_min:g} -> {sx.n_simulation} / {n_before} kept"
+        )
+elif args.train_n_bands_min > 0:
+    print(
+        "    WARNING: --train-n-bands-min is only implemented for observation-space='flux'; "
+        "ignoring cut."
+    )
 
 if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
