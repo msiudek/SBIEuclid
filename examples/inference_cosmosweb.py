@@ -18,6 +18,7 @@ Selection criteria applied before inference:
 """
 
 import argparse
+import logging
 import pickle
 from pathlib import Path
 
@@ -139,6 +140,11 @@ def parse_args():
                        "Optional extra inference-side thresholds for no-retraining bias test, "
                        "e.g. --snr-threshold-sweep 3 5 10. Uses same selected galaxies and model."
                    ))
+    p.add_argument("--suppress-rejection-warnings", action="store_true",
+                   help=(
+                       "Suppress repetitive sbi rejection-sampler warnings about very low "
+                       "proposal acceptance. Useful for cleaner logs in large runs."
+                   ))
     return p.parse_args()
 
 
@@ -147,6 +153,18 @@ def _find_first_existing_column(cat, candidates):
         if name in cat.colnames:
             return name
     return None
+
+
+def _install_rejection_warning_filter():
+    """Drop repetitive low-acceptance warnings from sbi rejection sampler."""
+
+    class _RejectionSamplerFilter(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            return "Only 0.000% proposal samples are" not in msg
+
+    root_logger = logging.getLogger()
+    root_logger.addFilter(_RejectionSamplerFilter())
 
 
 # ── photometry helpers ─────────────────────────────────────────────────────
@@ -451,16 +469,43 @@ def main():
     with open(model_file, "rb") as f:
         qphi_model = pickle.load(f)
 
-    # In sbi>=0.23, anpe.build_posterior(sample_with='rejection') requires
-    # passing an explicit prior. For rejection mode, use the pickled posterior
-    # directly to keep behavior stable and avoid false warning/fallback noise.
+    # Rejection mode can require explicit prior in newer sbi versions.
+    # Prefer rebuilding from SNPE object with explicit prior when possible.
     if args.sample_with == "rejection":
-        qphi = qphi_model
-        posterior_source = "model-pickle"
-        print(
-            "Rejection backend requested: using pickled posterior object directly; "
-            "skipping anpe.build_posterior(sample_with='rejection')."
-        )
+        if args.suppress_rejection_warnings:
+            _install_rejection_warning_filter()
+            print("Rejection sampler low-acceptance warnings are suppressed.")
+
+        try:
+            with open(anpe_file, "rb") as f:
+                anpe = pickle.load(f)
+
+            prior_for_rejection = getattr(anpe, "_prior", None)
+            if prior_for_rejection is not None:
+                qphi = anpe.build_posterior(sample_with="rejection", prior=prior_for_rejection)
+                posterior_source = "anpe-rebuild-rejection-prior"
+                print("Using rejection posterior rebuilt from anpe with explicit prior.")
+            else:
+                qphi = anpe.build_posterior(sample_with="rejection")
+                posterior_source = "anpe-rebuild-rejection"
+                print("Using rejection posterior rebuilt from anpe.")
+
+            ok, err = _supports_obs_plus_z(qphi)
+            if not ok:
+                probe_errors.append(f"anpe rejection posterior incompatible with obs+z context ({err})")
+                qphi = None
+                posterior_source = None
+        except Exception as exc:
+            print(
+                f"WARNING: could not rebuild rejection posterior from {anpe_file} ({exc}). "
+                "Falling back to pickled posterior object."
+            )
+            probe_errors.append(f"anpe rejection rebuild failed ({exc})")
+
+        if qphi is None:
+            qphi = qphi_model
+            posterior_source = "model-pickle"
+            print("Rejection backend requested: using pickled posterior object directly.")
     else:
         # Prefer rebuilding posterior from SNPE object when available.
         # This is more robust than relying on a pickled posterior object and
