@@ -28,6 +28,10 @@ def run_inference_subset(mag_min, mag_max, mag_band="NISP-Y", suffix=""):
         "--mag-min", str(mag_min),
         "--mag-max", str(mag_max),
         "--outdir", outdir,
+        "--device", "cuda",
+        "--n-bands-min", "7",
+        "--snr-min", "3",
+        "--phot-type", "templfit",
         "--sample-with", "rejection",
         "--observation-space", "flux",
     ]
@@ -141,7 +145,7 @@ def plot_comparison(results_dict):
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Test sigma mismatch impact on faint galaxies")
-    p.add_argument("--model-name", type=str, default="model_euclid_v6.3_20k.pkl",
+    p.add_argument("--model-name", type=str, default="model_euclid_v9.0.pkl",
                    help="Model file to use for inference")
     p.add_argument("--skip-bright", action="store_true",
                    help="Skip bright galaxy test (mag 22-24)")
