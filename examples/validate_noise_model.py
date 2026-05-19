@@ -711,6 +711,7 @@ def normalize_atlas_name(provided_name):
 def build_validation_model(args, obs_dir, library_dir):
     """Create and configure the sbipix model used for validation."""
     from sbipix import sbipix
+    from pathlib import Path
 
     model = sbipix()
     noise_prefix = f"north_{args.phot_type}"
@@ -726,8 +727,25 @@ def build_validation_model(args, obs_dir, library_dir):
     )
     model.atlas_path = str(library_dir) + "/"
     model.model_path = str(library_dir) + "/"
-    model.atlas_name = normalize_atlas_name(args.atlas_name)
-    model.n_simulation = args.n_sim
+    
+    # Normalize the atlas name (strip .dbatlas and _*_Nparam_* suffixes)
+    base_atlas_name = normalize_atlas_name(args.atlas_name)
+    
+    # Check if an exact file exists with the base name + .dbatlas
+    # This allows users to use custom atlas names that don't follow the standard pattern
+    exact_file = Path(library_dir) / f"{base_atlas_name}.dbatlas"
+    if exact_file.exists():
+        # Use the base name as-is (without size/Nparam suffixes)
+        # by setting n_simulation to match the actual file
+        # We'll use a sentinel value that sbipix won't modify
+        model.atlas_name = base_atlas_name
+        model.n_simulation = args.n_sim
+        model._skip_standard_naming = True  # Flag to skip standard suffix appending if possible
+    else:
+        # Fall back to standard naming: sbipix will append _*_Nparam_2
+        model.atlas_name = base_atlas_name
+        model.n_simulation = args.n_sim
+    
     model.parametric = True
     model.both_masses = True
     model.infer_z = False
@@ -745,9 +763,49 @@ def build_validation_model(args, obs_dir, library_dir):
 
 def load_or_simulate_model(model, args, outdir):
     """Load an existing atlas or simulate a new one, then save theta histograms."""
+    from pathlib import Path
+    import hickle
+    
     if args.skip_simulate:
         print("[1/3] Loading existing simulation...")
-        model.load_simulation()
+        
+        # Check if an exact custom atlas file exists (without size/Nparam suffixes)
+        base_name = normalize_atlas_name(args.atlas_name)
+        custom_atlas_file = Path(model.atlas_path) / f"{base_name}.dbatlas"
+        
+        if custom_atlas_file.exists():
+            # Load directly from the custom atlas file
+            print(f"  Loading custom atlas: {custom_atlas_file.name}")
+            try:
+                atlas_data = hickle.load(str(custom_atlas_file))
+                
+                # Reconstruct theta from atlas parameters:
+                # theta columns: [logM*, logSFR, tau, t_i, [M/H], Av, z]
+                n_gal = len(atlas_data['mstar'])
+                theta = np.column_stack([
+                    np.log10(atlas_data['mstar']),           # logM*
+                    np.log10(atlas_data['sfr']),             # logSFR
+                    atlas_data['sfh_tuple'][:, 0],           # tau
+                    atlas_data['sfh_tuple'][:, 1],           # t_i
+                    atlas_data['met'],                       # [M/H]
+                    atlas_data['dust'],                      # Av
+                    atlas_data['zval'],                      # z
+                ])
+                
+                # obs is the SED (sed columns are individual filters)
+                obs = atlas_data['sed']
+                
+                model.theta = theta
+                model.obs = obs
+                model.n_simulation = n_gal
+                print(f"  Loaded {model.n_simulation} galaxies from custom atlas")
+            except Exception as e:
+                print(f"  Error loading custom atlas: {e}")
+                print(f"  Falling back to standard sbipix loading...")
+                model.load_simulation()
+        else:
+            # Use standard sbipix loading
+            model.load_simulation()
     else:
         print(f"[1/3] Simulating {args.n_sim} galaxy SEDs...")
         model.simulate(**SIMULATION_CONFIG)
@@ -1054,7 +1112,11 @@ def main():
         else:
             print("  flux ratio: skipped (non-positive flux)")
 
-        debug_mass_flux_scaling_fixed_nuisance(model, target_masses=(9.0, 10.0, 11.0))
+        # Only run full debug if theta has 8 columns (standard atlas)
+        if model.theta.shape[1] >= 8:
+            debug_mass_flux_scaling_fixed_nuisance(model, target_masses=(9.0, 10.0, 11.0))
+        else:
+            print("  (skipped manual FSPS debug: custom atlas with fewer parameters)")
     else:
         print("Checking luminosity scaling... skipped (theta/obs unavailable)")
 
