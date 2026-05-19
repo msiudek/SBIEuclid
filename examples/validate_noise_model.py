@@ -90,7 +90,7 @@ LN10 = np.log(10.0)
 SIMULATION_CONFIG = {
     "mass_min": 6.0,
     "mass_max": 11.5,
-    "sfr_prior_type": "sSFRlognormal",
+    "sfr_prior_type": "SFRflat",
     "ssfr_min": -12.5,
     "ssfr_max": -7.0,
     "z_prior": "flat",
