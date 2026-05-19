@@ -688,6 +688,26 @@ def run_flux_asinh_slope_diagnostic(model, mock_data):
         print(f"  Collapse summary: {collapse}/{total} bins with ratio<0.5 ({100*collapse/total:.1f}%)")
 
 
+def normalize_atlas_name(provided_name):
+    """
+    Normalize atlas name to base form (without size/Nparam suffixes or .dbatlas extension).
+    
+    Accepts:
+    - "atlas_obs_euclid_north_validate" -> returns same
+    - "atlas_obs_euclid_north_validate_100000_Nparam_2.dbatlas" -> returns "atlas_obs_euclid_north_validate"
+    - "atlas_obs_euclid_north_validate_100000_Nparam_2" -> returns "atlas_obs_euclid_north_validate"
+    """
+    import re
+    
+    name = provided_name
+    # Remove .dbatlas extension if present
+    if name.endswith('.dbatlas'):
+        name = name[:-8]
+    # Remove size/Nparam suffixes if present (e.g., "_100000_Nparam_2")
+    name = re.sub(r'_\d+_Nparam_\d+$', '', name)
+    return name
+
+
 def build_validation_model(args, obs_dir, library_dir):
     """Create and configure the sbipix model used for validation."""
     from sbipix import sbipix
@@ -706,7 +726,7 @@ def build_validation_model(args, obs_dir, library_dir):
     )
     model.atlas_path = str(library_dir) + "/"
     model.model_path = str(library_dir) + "/"
-    model.atlas_name = "atlas_obs_euclid_north_validate"
+    model.atlas_name = normalize_atlas_name(args.atlas_name)
     model.n_simulation = args.n_sim
     model.parametric = True
     model.both_masses = True
@@ -947,6 +967,8 @@ def build_parser():
     p.add_argument("--calibrate", action="store_true",
                    help="Apply per-band median magnitude calibration after mock-matching: "
                         "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
+    p.add_argument("--atlas-name", default="atlas_obs_euclid_north_validate",
+                   help="Base name for the atlas file (without size/Nparam suffix; default: atlas_obs_euclid_north_validate)")
     p.add_argument("--fast", action="store_true",
                    help="Fast local mode: cap n_sim and downsample heavy plotting inputs")
     p.add_argument("--max-plot-objects", type=int, default=None,
@@ -989,6 +1011,7 @@ def main():
         )
 
     print("Noise-model settings:")
+    print(f"  atlas name     = {model.atlas_name}")
     print(f"  noise prefix   = {noise_prefix}")
     print(f"  limits file    = {limits_file}")
     print(f"  sigma sampler  = {model.noise_sigma_sampler}")
