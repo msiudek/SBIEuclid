@@ -1,4 +1,4 @@
-"""Generate observational feature files from COSMOS-Deep FITS catalog."""
+"""Generate observational feature files from COSMOS-Deep PHZ FITS catalog."""
 
 import numpy as np
 from astropy.table import Table
@@ -12,7 +12,7 @@ def _trapezoid(y, x):
     return getattr(np, "trapz")(y, x)
 
 # Hard-coded configuration
-FITS_PATH = "COSMOS-Web/matched_euclid_cosmosweb.fits"
+FITS_PATH = "COSMOS_DEEP_PHZ.fits"
 FILTER_LIST_FILE = "filters_to_use.dat"
 FILTER_DIR = "."
 OUT_DIR = "."
@@ -23,7 +23,7 @@ PHOT_TYPES = ["templfit"]
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
-PATCH_ID = 65879
+PATCH_ID = 98
 SNR_THRESHOLD = 3.0
 
 def build_phot_col(stem, phot_type, err=False):
@@ -185,60 +185,27 @@ def compute_noise_features(phot_ujy, err_ujy, percentile_cuts, snr_threshold=2.0
     return percentiles, mean_sigma, std_sigma, sigma_samples
 
 
-def compute_background_limits(phot_ujy, err_ujy, snr_threshold=2.0, faint_percentile=20.0,
+def compute_background_limits(phot_ujy, err_ujy, snr_threshold=3.0, faint_percentile=20.0,
                               depth5_ujy=None):
     """Return the 1-sigma flux limit per filter.
 
-    When ``depth5_ujy`` is provided (an array of 5σ flux limits in μJy, one
-    per filter), the 1σ limit is simply ``depth5_ujy / 5``.  This is the
-    recommended path: it ties the non-detection error floor directly to the
-    survey's known point-source detection limit, ensuring consistency between
-    training mocks and real observations.
-
-    When ``depth5_ujy`` is None, the limit is estimated empirically from the
-    catalog as the median error of near-threshold (low-SNR) objects.  This
-    fallback tends to underestimate the true depth for template-fit photometry
-    and should only be used when external depth information is unavailable.
+    Uses the median flux error of near-threshold (SNR < snr_threshold) objects.
+    This conservative estimate accounts for the effective noise floor of the survey
+    and is the appropriate floor for the OOD sigma_mag formula used during training.
     """
-    if depth5_ujy is not None:
-        depth5_ujy = np.asarray(depth5_ujy, dtype=float)
-        if depth5_ujy.shape[0] != phot_ujy.shape[0]:
-            raise ValueError(
-                f"depth5_ujy length ({depth5_ujy.shape[0]}) must match "
-                f"n_filters ({phot_ujy.shape[0]})"
-            )
-        return depth5_ujy / 5.0
-
-    # --- Empirical fallback ---
-    # Use the 5th percentile of fluxerr from faint *detected* objects (SNR >= threshold,
-    # faintest 30% by flux).  This mirrors the effective noise floor of template-fit
-    # photometry: templfit combines multi-band information and can assign errors below
-    # the single-band background noise, so the floor should reflect what detected faint
-    # objects actually achieve — not the median error of near-threshold (SNR<3) objects,
-    # which overcounts the noise floor and kills faint galaxy detections in training.
     valid = np.isfinite(phot_ujy) & np.isfinite(err_ujy) & (phot_ujy > 0) & (err_ujy > 0)
     snr = np.full_like(phot_ujy, np.nan, dtype=float)
     np.divide(phot_ujy, err_ujy, out=snr, where=valid)
 
     limits = np.zeros(phot_ujy.shape[0])
     for i in range(phot_ujy.shape[0]):
-        phot_i = phot_ujy[i, valid[i, :]]
-        err_i  = err_ujy[i, valid[i, :]]
-        snr_i  = snr[i, valid[i, :]]
-
-        if len(phot_i) > 0:
-            # Faint detected objects: SNR >= threshold AND in the faintest 30% by flux
-            det_mask = np.isfinite(snr_i) & (snr_i >= snr_threshold)
-            if np.any(det_mask):
-                faint_cut = np.percentile(phot_i[det_mask], 30)
-                faint_det_mask = det_mask & (phot_i <= faint_cut)
-                if np.any(faint_det_mask):
-                    limits[i] = np.percentile(err_i[faint_det_mask], 10)
-                else:
-                    limits[i] = np.percentile(err_i[det_mask], 10)
-            else:
-                # Fallback: no detected objects, use p10 of all valid errors
-                limits[i] = np.percentile(err_i, 10)
+        err_i = err_ujy[i, valid[i, :]]
+        snr_i = snr[i, valid[i, :]]
+        low_snr_mask = snr_i < snr_threshold
+        if np.any(low_snr_mask):
+            limits[i] = np.median(err_i[low_snr_mask])
+        elif len(err_i) > 0:
+            limits[i] = np.median(err_i)
 
     return limits
 
