@@ -1,4 +1,4 @@
-"""Generate observational feature files from COSMOS-Deep PHZ FITS catalog."""
+"""Generate observational feature files from COSMOS-Deep FITS catalog."""
 
 import numpy as np
 from astropy.table import Table
@@ -19,7 +19,14 @@ OUT_DIR = "."
 # Photometry types to process:
 #   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
 #   'templfit'       → template-fit (flux_{stem}_templfit; VIS uses flux_vis_psf)
-PHOT_TYPES = ["templfit"]
+#   'total'          → total flux:  F_band = flux_detection_total × (F_band_2fwhm / F_vis_2fwhm)
+#                      Uses aperture color ratios to distribute the per-galaxy total flux
+#                      across bands, consistent with Euclid pipeline convention.
+PHOT_TYPES = ["total"]
+
+# Detection band used as the reference for 'total' photometry
+DETECTION_TOTAL_COL = "flux_detection_total"
+DETECTION_APER_STEM = "vis"   # denominator: flux_vis_2fwhm_aper
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
@@ -107,15 +114,43 @@ def load_from_fits(fits_path, entries, phot_type, patch_id=98):
     phot_list = []
     err_list = []
 
-    for entry in entries:
-        stem = entry["col_stem"]
-        fcol = build_phot_col(stem, phot_type, err=False)
-        ecol = build_phot_col(stem, phot_type, err=True)
-        if fcol not in cat.colnames:
-            raise KeyError(f"Column '{fcol}' not found in {fits_path}. "
-                           f"Available flux cols sample: {[c for c in cat.colnames if 'flux' in c][:8]}")
-        phot_list.append(np.array(cat[fcol], dtype=float))
-        err_list.append(np.array(cat[ecol], dtype=float))
+    if phot_type == "total":
+        # F_band_total = flux_detection_total × (flux_{stem}_2fwhm_aper / flux_vis_2fwhm_aper)
+        # σ_band_total = flux_detection_total × (fluxerr_{stem}_2fwhm_aper / flux_vis_2fwhm_aper)
+        # Preserves aperture colors; normalises to total flux in detection band.
+        det_total = np.array(cat[DETECTION_TOTAL_COL], dtype=float)
+        vis_aper = np.array(cat[f"flux_{DETECTION_APER_STEM}_2fwhm_aper"], dtype=float)
+        # Scale factor per galaxy; NaN where vis aperture is non-positive
+        with np.errstate(divide='ignore', invalid='ignore'):
+            scale = np.where(
+                np.isfinite(vis_aper) & (vis_aper > 0) & np.isfinite(det_total),
+                det_total / vis_aper,
+                np.nan,
+            )
+        print(f"   total-flux scale (det_total/vis_aper): "
+              f"p10={np.nanpercentile(scale, 10):.3f} "
+              f"p50={np.nanpercentile(scale, 50):.3f} "
+              f"p90={np.nanpercentile(scale, 90):.3f}")
+        for entry in entries:
+            stem = entry["col_stem"]
+            aper_col = f"flux_{stem}_2fwhm_aper"
+            aper_err_col = f"fluxerr_{stem}_2fwhm_aper"
+            if aper_col not in cat.colnames:
+                raise KeyError(f"Column '{aper_col}' not found in {fits_path}.")
+            band_aper = np.array(cat[aper_col], dtype=float)
+            band_err  = np.array(cat[aper_err_col], dtype=float)
+            phot_list.append(scale * band_aper)
+            err_list.append(scale * band_err)
+    else:
+        for entry in entries:
+            stem = entry["col_stem"]
+            fcol = build_phot_col(stem, phot_type, err=False)
+            ecol = build_phot_col(stem, phot_type, err=True)
+            if fcol not in cat.colnames:
+                raise KeyError(f"Column '{fcol}' not found in {fits_path}. "
+                               f"Available flux cols sample: {[c for c in cat.colnames if 'flux' in c][:8]}")
+            phot_list.append(np.array(cat[fcol], dtype=float))
+            err_list.append(np.array(cat[ecol], dtype=float))
 
     phot = np.vstack(phot_list)
     err = np.vstack(err_list)
