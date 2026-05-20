@@ -12,7 +12,7 @@ def _trapezoid(y, x):
     return getattr(np, "trapz")(y, x)
 
 # Hard-coded configuration
-FITS_PATH = "COSMOS_DEEP_PHZ.fits"
+FITS_PATH = "COSMOS_DEEP.fits"
 FILTER_LIST_FILE = "filters_to_use.dat"
 FILTER_DIR = "."
 OUT_DIR = "."
@@ -23,7 +23,7 @@ PHOT_TYPES = ["templfit"]
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
-PATCH_ID = 65879
+PATCH_ID = 98
 SNR_THRESHOLD = 3.0
 
 def build_phot_col(stem, phot_type, err=False):
@@ -133,11 +133,13 @@ def compute_noise_features(phot_ujy, err_ujy, percentile_cuts, snr_threshold=2.0
     - std_sigma: std of mag error per bin (n_filters × n_bins)
     - sigma_samples: raw mag error samples per bin (n_filters × n_bins, dtype=object)
     """
-    # Include ALL positive-flux galaxies regardless of SNR — near-threshold objects
-    # with SNR~0.5-1 have sigma_mag >> 1 and are essential for training the network
-    # to be appropriately uncertain about faint galaxies. Filtering at SNR>=3 caps
-    # sigma_mag at ~0.36 and collapses the p50 from ~2.66 to ~0.14.
+    # Only include well-detected galaxies (SNR >= threshold) in the LUT.
+    # The training p50~2.66 for VIS comes from OOD atlas galaxies (very faint,
+    # sigma from background-noise formula), not from the LUT itself.
     valid = np.isfinite(phot_ujy) & np.isfinite(err_ujy) & (phot_ujy > 0) & (err_ujy > 0)
+    snr = np.full_like(phot_ujy, np.nan, dtype=float)
+    np.divide(phot_ujy, err_ujy, out=snr, where=valid)
+    valid &= np.isfinite(snr) & (snr >= snr_threshold)
     
     # Convert to magnitude: m = -2.5 * log10(flux_ujy / 3631 Jy)
     mag = np.full_like(phot_ujy, np.nan)
