@@ -269,6 +269,16 @@ def main():
         print(f"   ✓ sigma_samples_{prefix}.npy")
         np.save(os.path.join(OUT_DIR, f"background_noise_{prefix}.npy"), limits)
         print(f"   ✓ background_noise_{prefix}.npy")
+        print(f"   background_noise (uJy): {np.array2string(limits, precision=5)}")
+        print(f"   VIS (filter 0) sigma_lim = {limits[0]:.5f} uJy  [target ~0.027]")
+        # Also print sigma_samples p50 per filter as sanity check
+        p50_per_filter = []
+        for i in range(sigma_samples.shape[0]):
+            all_s = np.concatenate([sigma_samples[i, j] for j in range(sigma_samples.shape[1])
+                                    if sigma_samples[i, j] is not None and len(sigma_samples[i, j]) > 0])
+            p50_per_filter.append(np.median(all_s) if len(all_s) > 0 else np.nan)
+        print(f"   sigma_mag p50 per filter: {np.array2string(np.array(p50_per_filter), precision=3)}")
+        print(f"   VIS sigma_mag p50 = {p50_per_filter[0]:.3f}  [target ~2.66]")
 
     print("\n" + "=" * 60)
     print("COMPLETE!")
