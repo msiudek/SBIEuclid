@@ -23,7 +23,7 @@ PHOT_TYPES = ["templfit"]
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
-PATCH_ID = 98
+PATCH_ID = 65879
 SNR_THRESHOLD = 3.0
 
 def build_phot_col(stem, phot_type, err=False):
