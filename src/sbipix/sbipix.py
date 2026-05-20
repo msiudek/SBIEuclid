@@ -1222,29 +1222,16 @@ class sbipix():
                     mags[in_domain], filter_idx
                 )
 
-            # Out-of-domain: split by direction.
-            # Faint (mag > valid_max): template-fit photometry plateaus at ~0.25-0.35 mag σ
-            # — multi-band SED constraints keep errors bounded rather than diverging.
-            # Bright (mag < valid_min): background-limited formula gives near-zero σ_mag.
+            # Out-of-domain: background-noise-limited formula.
+            # σ_flux = σ_lim  →  σ_mag = (2.5/ln10) * σ_lim / |flux|
+            # For very faint atlas galaxies this → large σ_mag (clips at sigma_mag_max=10),
+            # meaning the band carries no information — physically correct for non-detections.
             if np.any(~in_domain):
-                faint_ood = (~in_domain) & (mags > valid_max)
-                bright_ood = (~in_domain) & (mags <= valid_min)
-
-                if np.any(faint_ood):
-                    last_mean = float(self.mean_sigma_obs[filter_idx, -1])
-                    last_std  = float(self.stds_sigma_obs[filter_idx, -1])
-                    n_faint   = int(faint_ood.sum())
-                    sigma_mag_faint = np.random.normal(last_mean, last_std, n_faint)
-                    sigma_mag_faint = np.clip(sigma_mag_faint, self.noise_sigma_floor,
-                                              last_mean + 3.0 * last_std)
-                    sigma_mag[faint_ood] = sigma_mag_faint
-
-                if np.any(bright_ood):
-                    flux_bright = np.maximum(np.abs(flux_true[bright_ood]), 1e-12)
-                    sigma_mag_bright = (2.5 / np.log(10)) * sigma_lim / flux_bright
-                    sigma_mag_bright = np.clip(sigma_mag_bright, self.noise_sigma_floor,
-                                               self.noise_sigma_mag_max)
-                    sigma_mag[bright_ood] = sigma_mag_bright
+                flux_ood = np.maximum(np.abs(flux_true[~in_domain]), 1e-12)
+                sigma_mag_ood = (2.5 / np.log(10)) * sigma_lim / flux_ood
+                sigma_mag_ood = np.clip(sigma_mag_ood, self.noise_sigma_floor,
+                                        self.noise_sigma_mag_max)
+                sigma_mag[~in_domain] = sigma_mag_ood
 
             # Debug: print σ_mag percentiles once per call to spot rogue values
             p50, p90, p99, p999 = np.nanpercentile(sigma_mag, [50, 90, 99, 99.9])
