@@ -644,6 +644,20 @@ def run_flux_asinh_slope_diagnostic(model, mock_data):
     if getattr(model, "noise_observation_space", "mag") != "flux":
         return
 
+    # Check if redshift parameter exists in theta
+    n_params = model.theta.shape[1]
+    z_idx = None
+    # Standard atlas has 8 parameters with z at index 7
+    # Custom atlases may have fewer parameters with z at the last index if present
+    if n_params >= 8:
+        z_idx = 7
+    elif n_params >= 7:
+        z_idx = 6
+    else:
+        # If we don't have enough parameters for z, skip this diagnostic
+        print("  Skipping flux-space slope diagnostic (z parameter not available in theta)")
+        return
+
     z_bins = [
         (0.00, 0.25, "z=[0.00,0.25)"),
         (0.25, 0.50, "z=[0.25,0.50)"),
@@ -661,7 +675,7 @@ def run_flux_asinh_slope_diagnostic(model, mock_data):
         return float(np.polyfit(x[ok], y[ok], 1)[0])
 
     logm = np.asarray(model.theta[:, 0], dtype=float)
-    z = np.asarray(model.theta[:, 7], dtype=float)
+    z = np.asarray(model.theta[:, z_idx], dtype=float)
     before_flux = np.asarray(model.true_flux if hasattr(model, "true_flux") else mock_data["true_flux"], dtype=float)
     after_flux = np.asarray(mock_data["flux"], dtype=float)
     limits = np.asarray(model.limits, dtype=float)
@@ -792,8 +806,10 @@ def load_or_simulate_model(model, args, outdir):
                     atlas_data['zval'],                      # z
                 ])
                 
-                # obs is the SED (sed columns are individual filters)
-                obs = atlas_data['sed']
+                # obs is the SED (sed contains microjansky fluxes, shape: n_sim x n_filt)
+                # Convert microjansky fluxes to magnitudes (model.obs expects magnitudes)
+                sed_flux_ujy = atlas_data['sed']  # (n_sim, n_filt)
+                obs = flux_ujy_to_mag(sed_flux_ujy)  # Convert to magnitudes
                 
                 model.theta = theta
                 model.obs = obs

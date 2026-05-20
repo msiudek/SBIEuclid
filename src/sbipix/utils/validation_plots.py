@@ -395,6 +395,13 @@ def plot_intrinsic_color_vs_parameters(mock_data, model, outdir, filter_short):
 	if model.theta is None:
 		return []
 
+	# Check if we have enough parameters for this diagnostic
+	# Standard atlas: [logM*, ?, logSFR, ?, Z, Av, z, ...] (needs at least index 7 for z)
+	# Custom atlas: [logM*, logSFR, tau, t_i, Z, Av, z] (only has 7 params, no index 7)
+	if model.theta.shape[1] < 8:
+		# Custom atlas - skip this diagnostic
+		return []
+
 	idx = {name: filter_short.index(name) for name in filter_short}
 	if "DECam-i" not in idx:
 		return []

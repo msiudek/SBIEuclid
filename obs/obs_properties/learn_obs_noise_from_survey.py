@@ -12,14 +12,14 @@ def _trapezoid(y, x):
     return getattr(np, "trapz")(y, x)
 
 # Hard-coded configuration
-FITS_PATH = "COSMOS_DEEP_PHZ.fits"
+FITS_PATH = "COSMOS-Web/matched_euclid_cosmosweb.fits"
 FILTER_LIST_FILE = "filters_to_use.dat"
 FILTER_DIR = "."
 OUT_DIR = "."
 # Photometry types to process:
 #   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
 #   'templfit'       → template-fit (flux_{stem}_templfit; VIS uses flux_vis_psf)
-PHOT_TYPES = ["2fwhm", "3fwhm", "templfit"]
+PHOT_TYPES = ["templfit"]
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
@@ -209,7 +209,13 @@ def compute_background_limits(phot_ujy, err_ujy, snr_threshold=2.0, faint_percen
             )
         return depth5_ujy / 5.0
 
-    # --- Empirical fallback (legacy) ---
+    # --- Empirical fallback ---
+    # Use the 5th percentile of fluxerr from faint *detected* objects (SNR >= threshold,
+    # faintest 30% by flux).  This mirrors the effective noise floor of template-fit
+    # photometry: templfit combines multi-band information and can assign errors below
+    # the single-band background noise, so the floor should reflect what detected faint
+    # objects actually achieve — not the median error of near-threshold (SNR<3) objects,
+    # which overcounts the noise floor and kills faint galaxy detections in training.
     valid = np.isfinite(phot_ujy) & np.isfinite(err_ujy) & (phot_ujy > 0) & (err_ujy > 0)
     snr = np.full_like(phot_ujy, np.nan, dtype=float)
     np.divide(phot_ujy, err_ujy, out=snr, where=valid)
@@ -221,13 +227,18 @@ def compute_background_limits(phot_ujy, err_ujy, snr_threshold=2.0, faint_percen
         snr_i  = snr[i, valid[i, :]]
 
         if len(phot_i) > 0:
-            low_snr_mask = np.isfinite(snr_i) & (snr_i < snr_threshold)
-            if np.any(low_snr_mask):
-                limits[i] = np.median(err_i[low_snr_mask])
+            # Faint detected objects: SNR >= threshold AND in the faintest 30% by flux
+            det_mask = np.isfinite(snr_i) & (snr_i >= snr_threshold)
+            if np.any(det_mask):
+                faint_cut = np.percentile(phot_i[det_mask], 30)
+                faint_det_mask = det_mask & (phot_i <= faint_cut)
+                if np.any(faint_det_mask):
+                    limits[i] = np.percentile(err_i[faint_det_mask], 10)
+                else:
+                    limits[i] = np.percentile(err_i[det_mask], 10)
             else:
-                cut = np.percentile(phot_i, faint_percentile)
-                faint_mask = phot_i <= cut
-                limits[i] = np.median(err_i[faint_mask])
+                # Fallback: no detected objects, use p10 of all valid errors
+                limits[i] = np.percentile(err_i, 10)
 
     return limits
 
