@@ -126,18 +126,18 @@ def load_from_fits(fits_path, entries, phot_type, patch_id=98):
 def compute_noise_features(phot_ujy, err_ujy, percentile_cuts, snr_threshold=2.0):
     """
     Compute magnitude bins and uncertainty statistics.
-    
+
     Returns:
     - percentiles: magnitude bin edges (n_cuts × n_filters)
     - mean_sigma: mean mag error per bin (n_filters × n_bins)
     - std_sigma: std of mag error per bin (n_filters × n_bins)
     - sigma_samples: raw mag error samples per bin (n_filters × n_bins, dtype=object)
     """
-    # Detection regime only: finite, positive, and SNR above threshold
+    # Include ALL positive-flux galaxies regardless of SNR — near-threshold objects
+    # with SNR~0.5-1 have sigma_mag >> 1 and are essential for training the network
+    # to be appropriately uncertain about faint galaxies. Filtering at SNR>=3 caps
+    # sigma_mag at ~0.36 and collapses the p50 from ~2.66 to ~0.14.
     valid = np.isfinite(phot_ujy) & np.isfinite(err_ujy) & (phot_ujy > 0) & (err_ujy > 0)
-    snr = np.full_like(phot_ujy, np.nan, dtype=float)
-    np.divide(phot_ujy, err_ujy, out=snr, where=valid)
-    valid &= np.isfinite(snr) & (snr >= snr_threshold)
     
     # Convert to magnitude: m = -2.5 * log10(flux_ujy / 3631 Jy)
     mag = np.full_like(phot_ujy, np.nan)
