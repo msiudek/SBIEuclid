@@ -80,12 +80,14 @@ def build_parser():
     )
     p.add_argument(
         "--phot-type",
-        choices=["2fwhm", "3fwhm", "templfit"],
+        choices=["2fwhm", "3fwhm", "templfit", "total"],
         default="templfit",
         help=(
             "Photometry type used for noise model and mock matching. "
             "'templfit' uses template-fit fluxes (flux_{stem}_templfit; VIS: flux_vis_psf). "
-            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. Default: templfit"
+            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. "
+            "'total' uses Euclid total-flux formula (F_band = det_total × F_band_aper/F_vis_aper); "
+            "requires --mock-match none. Default: templfit"
         ),
     )
     p.add_argument(
@@ -385,6 +387,11 @@ sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
+
+if args.mock_match != "none" and args.phot_type == "total":
+    print("    Mock matching skipped: phot_type='total' has no column equivalent in COSMOS_DEEP_PHZ.fits.")
+    print("    Re-run with --mock-match none when using --phot-type total.")
+    args.mock_match = "none"
 
 if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
