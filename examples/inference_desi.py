@@ -1,20 +1,27 @@
 """
-Stellar mass estimation for real Euclid galaxies matched to COSMOS-Web.
+Stellar mass estimation for real Euclid galaxies matched to DESI.
 
 Uses a trained mass_sfr model to infer logM* and logSFR from 10-band
-photometry in the matched_euclid_cosmosweb.fits catalog and compares to
-COSMOS-Web reference quantities.
+photometry in the matched_euclid_desi.fits catalog and compares to
+DESI Cigale reference quantities.
 
 Usage
 -----
-python examples/inference_cosmosweb.py \
+python examples/inference_desi.py \
     --n-gal 500 --snr-min 3 --n-bands-min 7 --n-samples 200 \
-    --outdir sbi-logs/inference_cosmosweb 2>&1 | tee sbi-logs/inference_cosmosweb.log
+    --model-name model_euclid_v20.0.pkl --phot-type total \
+    --observation-space flux \
+    --outdir sbi-logs/inference_desi 2>&1 | tee sbi-logs/inference_desi.log
 
 Selection criteria applied before inference:
-  - valid zfinal photometric redshift
-  - valid COSMOS-Web mass_med reference mass
+  - valid DESI spectroscopic redshift
+  - valid DESI Cigale logM* and logSFR reference values
   - at least --n-bands-min filters with SNR >= --snr-min
+
+Total-flux photometry (--phot-type total):
+  F_band = flux_detection_total × (flux_{band}_2fwhm_aper / flux_vis_2fwhm_aper)
+  Columns are looked up in COSMOS_DEEP.fits via euclid_id == object_id join,
+  so COSMOS_DEEP.fits must be present in obs/obs_properties/.
 """
 
 import argparse
@@ -32,8 +39,11 @@ ROOT       = Path(__file__).resolve().parents[1]
 OBS_DIR    = ROOT / "obs" / "obs_properties"
 LIB_DIR    = ROOT / "library"
 CATALOG    = ROOT / "obs" / "obs_properties" / "COSMOS-DESI" / "matched_euclid_desi.fits"
-MODEL_NAME   = "model_euclid_v1.5_mass_sfr_zcond.pkl"
-ATLAS_NAME   = "atlas_obs_euclid_north_validate_100000_Nparam_2.dbatlas"
+MODEL_NAME   = "model_euclid_v20.0.pkl"
+ATLAS_NAME   = "atlas_obs_euclid_north_validate_20000_Nparam_2.dbatlas"
+COSMOS_DEEP  = ROOT / "obs" / "obs_properties" / "COSMOS_DEEP.fits"
+DETECTION_TOTAL_COL  = "flux_detection_total"
+DETECTION_APER_STEM  = "vis"
 
 # Filter order from filters_to_use.dat (must match training order)
 FILTER_STEMS = [
@@ -73,7 +83,21 @@ def build_phot_col(stem, phot_type, err=False):
 
 
 def validate_requested_phot_type(cat, requested_phot_type):
-    """Validate that all required columns for requested phot_type exist."""
+    """Validate that all required columns for requested phot_type exist.
+
+    For phot_type='total', columns are not in the catalog — they are joined
+    from COSMOS_DEEP.fits, so we skip column validation here.
+    """
+    if requested_phot_type == "total":
+        if not COSMOS_DEEP.exists():
+            raise FileNotFoundError(
+                f"--phot-type total requires COSMOS_DEEP.fits at {COSMOS_DEEP}. "
+                "Copy it to obs/obs_properties/ or use --phot-type templfit."
+            )
+        if "euclid_id" not in cat.colnames:
+            raise KeyError("Catalog must have an 'euclid_id' column for total-flux join.")
+        return
+
     missing_flux = [
         build_phot_col(stem, requested_phot_type, err=False)
         for stem in FILTER_STEMS
@@ -100,6 +124,69 @@ def validate_requested_phot_type(cat, requested_phot_type):
         )
 
 
+def load_total_flux_for_catalog(euclid_ids):
+    """Join COSMOS_DEEP.fits on euclid_id==object_id and compute total-flux arrays.
+
+    Returns (flux, fluxerr) each of shape (n_gal, N_FILT) in µJy.
+    Rows that couldn't be matched or had non-positive vis aperture are NaN.
+    """
+    from astropy.io import fits as astrofits
+
+    needed_deep_cols = (
+        ["object_id", DETECTION_TOTAL_COL, f"flux_{DETECTION_APER_STEM}_2fwhm_aper"]
+        + [f"flux_{s}_2fwhm_aper"   for s in FILTER_STEMS]
+        + [f"fluxerr_{s}_2fwhm_aper" for s in FILTER_STEMS]
+    )
+
+    print(f"  [total-flux] Loading COSMOS_DEEP.fits (needed cols: {len(needed_deep_cols)}) …")
+    with astrofits.open(COSMOS_DEEP) as hdul:
+        avail = {c.name for c in hdul[1].columns}
+        missing = [c for c in needed_deep_cols if c not in avail]
+        if missing:
+            raise KeyError(f"COSMOS_DEEP.fits missing columns: {missing}")
+        deep_data = hdul[1].data
+        deep = {col: np.array(deep_data[col]) for col in needed_deep_cols}
+
+    deep_oid = deep["object_id"]
+    deep_idx = {int(oid): i for i, oid in enumerate(deep_oid)}
+
+    n_gal = len(euclid_ids)
+    flux_out   = np.full((n_gal, N_FILT), np.nan)
+    fluxerr_out = np.full((n_gal, N_FILT), np.nan)
+
+    matched = 0
+    for gi, eid in enumerate(euclid_ids):
+        idx = deep_idx.get(int(eid))
+        if idx is None:
+            continue
+        det_total = float(deep[DETECTION_TOTAL_COL][idx])
+        vis_aper  = float(deep[f"flux_{DETECTION_APER_STEM}_2fwhm_aper"][idx])
+        if not (np.isfinite(vis_aper) and vis_aper > 0 and np.isfinite(det_total)):
+            continue
+        scale = det_total / vis_aper
+        for fi, stem in enumerate(FILTER_STEMS):
+            f_aper  = float(deep[f"flux_{stem}_2fwhm_aper"][idx])
+            fe_aper = float(deep[f"fluxerr_{stem}_2fwhm_aper"][idx])
+            flux_out[gi, fi]    = scale * f_aper
+            fluxerr_out[gi, fi] = scale * fe_aper
+        matched += 1
+
+    print(f"  [total-flux] Matched {matched}/{n_gal} galaxies from COSMOS_DEEP.fits")
+    scale_all = np.array([
+        float(deep[DETECTION_TOTAL_COL][deep_idx[int(eid)]]) /
+        float(deep[f"flux_{DETECTION_APER_STEM}_2fwhm_aper"][deep_idx[int(eid)]])
+        if int(eid) in deep_idx else np.nan
+        for eid in euclid_ids
+    ])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale_all = np.where(scale_all > 0, scale_all, np.nan)
+    print(f"  [total-flux] det_total/vis_aper scale: "
+          f"p10={np.nanpercentile(scale_all,10):.3f} "
+          f"p50={np.nanpercentile(scale_all,50):.3f} "
+          f"p90={np.nanpercentile(scale_all,90):.3f}")
+    return flux_out, fluxerr_out
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="SBI mass inference on COSMOS-Web matched catalog")
     p.add_argument("--n-gal",       type=int,   default=500,
@@ -117,9 +204,11 @@ def parse_args():
     p.add_argument("--sample-with", type=str, default="mcmc", choices=["rejection", "mcmc"],
                    help="Posterior sampling backend (default: mcmc)")
     p.add_argument("--phot-type",   type=str, default="templfit",
-                   choices=["templfit", "2fwhm", "3fwhm"],
+                   choices=["templfit", "2fwhm", "3fwhm", "total"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
-                         "'2fwhm', or '3fwhm' aperture. Default: templfit"))
+                         "'2fwhm'/'3fwhm' aperture, or 'total' (Euclid total-flux formula "
+                         "F_band=det_total×F_band_aper/F_vis_aper, joined from COSMOS_DEEP.fits). "
+                         "Default: templfit"))
     p.add_argument("--observation-space", type=str, default="mag",
                    choices=["mag", "flux"],
                    help=(
@@ -276,25 +365,28 @@ def main():
     print(f"Photometry type: {effective_phot_type}  (noise prefix: {noise_prefix})")
 
     # Build flux and fluxerr arrays (n_gal, n_filt) in μJy
-    try:
-        flux = np.column_stack([
-            np.array(cat[build_phot_col(stem, effective_phot_type, err=False)], dtype=float)
-            for stem in FILTER_STEMS
-        ])
-        fluxerr = np.column_stack([
-            np.array(cat[build_phot_col(stem, effective_phot_type, err=True)], dtype=float)
-            for stem in FILTER_STEMS
-        ])
-    except KeyError as exc:
-        raise KeyError(
-            f"Column {exc} not found in catalog for phot_type='{effective_phot_type}'. "
-            "For 'templfit' the matched catalog must include templfit/psf columns "
-            "(re-run the catalog matching script to add them)."
-        ) from exc
+    euclid_id = np.array(cat["euclid_id"], dtype=np.int64)
 
+    if effective_phot_type == "total":
+        flux, fluxerr = load_total_flux_for_catalog(euclid_id)
+    else:
+        try:
+            flux = np.column_stack([
+                np.array(cat[build_phot_col(stem, effective_phot_type, err=False)], dtype=float)
+                for stem in FILTER_STEMS
+            ])
+            fluxerr = np.column_stack([
+                np.array(cat[build_phot_col(stem, effective_phot_type, err=True)], dtype=float)
+                for stem in FILTER_STEMS
+            ])
+        except KeyError as exc:
+            raise KeyError(
+                f"Column {exc} not found in catalog for phot_type='{effective_phot_type}'. "
+                "For 'templfit' the matched catalog must include templfit/psf columns "
+                "(re-run the catalog matching script to add them)."
+            ) from exc
 
-    # Reference values for DESI
-    euclid_id    = np.array(cat["euclid_id"],   dtype=float)
+    # Reference values for DESI (euclid_id already defined above)
     desi_id      = np.array(cat["desi_id"],     dtype=float)
     z_ref        = np.array(cat["z_desi"],      dtype=float)
     mass_ref     = np.array(cat["logM_desi_Cigale"], dtype=float)
