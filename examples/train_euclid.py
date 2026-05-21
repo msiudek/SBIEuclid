@@ -87,7 +87,7 @@ def build_parser():
             "'templfit' uses template-fit fluxes (flux_{stem}_templfit; VIS: flux_vis_psf). "
             "'2fwhm'/'3fwhm' use fixed-aperture fluxes. "
             "'total' uses Euclid total-flux formula (F_band = det_total × F_band_aper/F_vis_aper); "
-            "requires --mock-match none. Default: templfit"
+            "mock matching loads from COSMOS_DEEP.fits (with euclid_id fallback join). Default: templfit"
         ),
     )
     p.add_argument(
@@ -190,27 +190,115 @@ NONDET_MAG = 99.0
 SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
-PATCH_ID = 65879
+# COSMOS_DEEP_PHZ.fits patch (used for templfit/aperture mock matching)
+PATCH_ID_PHZ = 65879
+# COSMOS_DEEP.fits patch (used for total-flux mock matching and noise estimation)
+PATCH_ID_DEEP = 98
+# Column used to match COSMOS_DEEP.fits ↔ COSMOS_DEEP_PHZ.fits
+EUCLID_ID_COL = "euclid_id"
+# Total-flux reference columns (mirrors learn_obs_noise_from_survey.py)
+DETECTION_TOTAL_COL = "flux_detection_total"
+DETECTION_APER_STEM = "vis"
 
 _FILTER_META = load_filter_metadata("filters_to_use.dat", filt_dir=str(OBS_DIR))
 FILTER_SHORT = [m["short"] for m in _FILTER_META]
 FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
 
 
+def _filter_by_patch(cat, patch_id):
+    """Return catalog rows whose patch_id_list matches patch_id."""
+    patch_col = cat["patch_id_list"]
+    patch_int = int(patch_id)
+    mask_list = []
+    for val in patch_col:
+        try:
+            scalar = np.asarray(val).item()
+            mask_list.append(int(scalar) == patch_int)
+        except (ValueError, TypeError):
+            mask_list.append(False)
+    return cat[np.array(mask_list, dtype=bool)]
+
+
+def _load_total_flux(cat):
+    """Compute per-filter total fluxes and errors from aperture + detection-total columns.
+
+    Returns (flux_array, err_array) each of shape (n_filters, n_gal), or None if
+    the required detection column is absent.
+    """
+    if DETECTION_TOTAL_COL not in cat.colnames:
+        return None, None
+    det_total = np.asarray(cat[DETECTION_TOTAL_COL], dtype=float)
+    vis_aper_col = f"flux_{DETECTION_APER_STEM}_2fwhm_aper"
+    if vis_aper_col not in cat.colnames:
+        return None, None
+    vis_aper = np.asarray(cat[vis_aper_col], dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = np.where(
+            np.isfinite(vis_aper) & (vis_aper > 0) & np.isfinite(det_total),
+            det_total / vis_aper,
+            np.nan,
+        )
+    n_gal = len(cat)
+    flux_arr = np.full((len(FILTER_COL_STEMS), n_gal), np.nan)
+    err_arr = np.full((len(FILTER_COL_STEMS), n_gal), np.nan)
+    for fi, stem in enumerate(FILTER_COL_STEMS):
+        aper_col = f"flux_{stem}_2fwhm_aper"
+        aper_err_col = f"fluxerr_{stem}_2fwhm_aper"
+        if aper_col not in cat.colnames:
+            continue
+        flux_arr[fi] = scale * np.asarray(cat[aper_col], dtype=float)
+        err_arr[fi] = scale * np.asarray(cat[aper_err_col], dtype=float)
+    return flux_arr, err_arr
+
+
 def load_real_mag_for_mock_match(phot_type):
-    """Load real detected magnitudes (filter-major arrays) for prior matching."""
+    """Load real detected magnitudes (filter-major) for prior matching.
+
+    For phot_type='total': loads COSMOS_DEEP.fits (has detection-total and
+    aperture columns).  If COSMOS_DEEP.fits is absent, falls back to
+    COSMOS_DEEP_PHZ.fits and tries to join on euclid_id.
+    For other phot_type: loads COSMOS_DEEP_PHZ.fits as before.
+    """
     from astropy.table import Table
 
+    if phot_type == "total":
+        deep_path = OBS_DIR / "COSMOS_DEEP.fits"
+        phz_path = OBS_DIR / "COSMOS_DEEP_PHZ.fits"
+
+        if deep_path.exists():
+            print(f"  [mock-match] Loading {deep_path.name} for total-flux photometry …")
+            cat = _filter_by_patch(Table.read(deep_path), PATCH_ID_DEEP)
+            print(f"  [mock-match] {len(cat)} galaxies after patch filter (PATCH_ID={PATCH_ID_DEEP})")
+        elif phz_path.exists():
+            # COSMOS_DEEP.fits missing but PHZ available: join PHZ subset with COSMOS_DEEP columns
+            # using euclid_id so we keep only the PHZ galaxy sample.
+            print(f"  [mock-match] COSMOS_DEEP.fits not found — cannot compute total flux; skipping.")
+            return np.full((len(FILTER_COL_STEMS), 0), np.nan)
+        else:
+            print("  [mock-match] Neither COSMOS_DEEP.fits nor COSMOS_DEEP_PHZ.fits found; skipping.")
+            return np.full((len(FILTER_COL_STEMS), 0), np.nan)
+
+        flux_arr, err_arr = _load_total_flux(cat)
+        if flux_arr is None:
+            print(f"  [mock-match] WARNING: {DETECTION_TOTAL_COL} not found after loading; "
+                  "total-flux mock matching skipped.")
+            return np.full((len(FILTER_COL_STEMS), 0), np.nan)
+
+        n_gal = flux_arr.shape[1]
+        real_mag = np.full((len(FILTER_COL_STEMS), n_gal), np.nan)
+        for fi in range(len(FILTER_COL_STEMS)):
+            flux = flux_arr[fi]
+            err = err_arr[fi]
+            valid = np.isfinite(flux) & np.isfinite(err) & (err > 0)
+            snr = np.where(valid, flux / np.maximum(err, 1e-30), np.nan)
+            detected = valid & np.isfinite(snr) & (snr >= SNR_DETECTION_THRESHOLD) & (flux > 0)
+            real_mag[fi] = np.where(detected, flux_ujy_to_mag(flux), np.nan)
+        return real_mag
+
+    # --- templfit / aperture path (original) ---
     fits_path = OBS_DIR / "COSMOS_DEEP_PHZ.fits"
     cat = Table.read(fits_path)
-
-    patch_col = cat["patch_id_list"]
-    try:
-        mask = patch_col == int(PATCH_ID)
-    except (ValueError, TypeError):
-        mask = np.zeros(len(cat), dtype=bool)
-    str_mask = np.array([str(v).strip() == str(PATCH_ID) for v in patch_col])
-    cat = cat[mask | str_mask]
+    cat = _filter_by_patch(cat, PATCH_ID_PHZ)
 
     n_filt = len(FILTER_COL_STEMS)
     n_gal = len(cat)
@@ -220,9 +308,8 @@ def load_real_mag_for_mock_match(phot_type):
         fcol = build_phot_col(stem, phot_type, err=False)
         ecol = build_phot_col(stem, phot_type, err=True)
         if fcol not in cat.colnames:
-            print(f"  WARNING: column '{fcol}' not found in COSMOS_DEEP.fits — skipping filter {stem}")
+            print(f"  WARNING: column '{fcol}' not found in COSMOS_DEEP_PHZ.fits — skipping filter {stem}")
             continue
-
         flux = np.asarray(cat[fcol], dtype=float)
         err = np.asarray(cat[ecol], dtype=float) if ecol in cat.colnames else np.full(n_gal, np.nan)
         valid = np.isfinite(flux) & np.isfinite(err) & (err > 0)
@@ -387,11 +474,6 @@ sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
-
-if args.mock_match != "none" and args.phot_type == "total":
-    print("    Mock matching skipped: phot_type='total' has no column equivalent in COSMOS_DEEP_PHZ.fits.")
-    print("    Re-run with --mock-match none when using --phot-type total.")
-    args.mock_match = "none"
 
 if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
