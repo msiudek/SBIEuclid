@@ -1,5 +1,14 @@
-"""Generate observational feature files from COSMOS-Deep FITS catalog."""
+"""Generate observational feature files from COSMOS-Deep FITS catalog.
 
+Usage examples:
+    # 3fwhm aperture photometry (new default):
+    python learn_obs_noise_from_survey.py --phot-types 3fwhm --fits-path COSMOS_DEEP_PHZ.fits
+
+    # Multiple types at once:
+    python learn_obs_noise_from_survey.py --phot-types 3fwhm templfit --fits-path COSMOS_DEEP_PHZ.fits
+"""
+
+import argparse
 import numpy as np
 from astropy.table import Table
 import os
@@ -11,26 +20,16 @@ def _trapezoid(y, x):
         return trapezoid(y, x)
     return getattr(np, "trapz")(y, x)
 
-# Hard-coded configuration
-FITS_PATH = "COSMOS_DEEP.fits"
 FILTER_LIST_FILE = "filters_to_use.dat"
 FILTER_DIR = "."
 OUT_DIR = "."
-# Photometry types to process:
-#   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
-#   'templfit'       → template-fit (flux_{stem}_templfit; VIS uses flux_vis_psf)
-#   'total'          → total flux:  F_band = flux_detection_total × (F_band_2fwhm / F_vis_2fwhm)
-#                      Uses aperture color ratios to distribute the per-galaxy total flux
-#                      across bands, consistent with Euclid pipeline convention.
-PHOT_TYPES = ["total"]
-
 # Detection band used as the reference for 'total' photometry
 DETECTION_TOTAL_COL = "flux_detection_total"
 DETECTION_APER_STEM = "vis"   # denominator: flux_vis_2fwhm_aper
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
-PATCH_ID = 98
+PATCH_ID = 65879   # dominant patch in COSMOS_DEEP_PHZ.fits (417k/417k galaxies)
 SNR_THRESHOLD = 3.0
 
 def build_phot_col(stem, phot_type, err=False):
@@ -248,66 +247,75 @@ def compute_background_limits(phot_ujy, err_ujy, snr_threshold=3.0, faint_percen
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate noise feature .npy files from COSMOS-Deep.")
+    parser.add_argument("--phot-types", nargs="+",
+                        default=["3fwhm"],
+                        choices=["2fwhm", "3fwhm", "templfit", "total"],
+                        help="Photometry type(s) to process (default: 3fwhm)")
+    parser.add_argument("--fits-path", default="COSMOS_DEEP_PHZ.fits",
+                        help="FITS catalog filename (relative to this script's directory, default: COSMOS_DEEP_PHZ.fits)")
+    parser.add_argument("--patch-id", type=int, default=PATCH_ID,
+                        help=f"Patch ID to filter on (default: {PATCH_ID})")
+    args = parser.parse_args()
+
+    fits_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.fits_path) \
+        if not os.path.isabs(args.fits_path) else args.fits_path
+
     print("=" * 60)
     print("NOISE FEATURE COMPUTATION")
+    print(f"  catalog   : {fits_path}")
+    print(f"  phot_types: {args.phot_types}")
+    print(f"  patch_id  : {args.patch_id}")
     print("=" * 60)
 
-    # Load filter metadata (path, short name, FITS col_stem) from .dat file
     print("\n1. Loading filter metadata...")
     entries = load_filter_metadata(FILTER_LIST_FILE, FILTER_DIR)
     n_filters = len(entries)
     print(f"   {n_filters} filters: {', '.join(e['short'] for e in entries)}")
 
-    # Compute effective wavelengths
     print("\n2. Computing effective wavelengths...")
     lam_eff = compute_lambda_eff(entries)
     print(f"   lam_eff shape: {lam_eff.shape}")
-    print(f"   SNR threshold for detections: {SNR_THRESHOLD}")
+    print(f"   SNR threshold: {SNR_THRESHOLD}")
 
-    # Save outputs directory
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"\n3. Output directory: {os.path.abspath(OUT_DIR)}")
 
-    # Process each photometry type independently and write separate files
-    for phot_type in PHOT_TYPES:
+    for phot_type in args.phot_types:
         prefix = f"{HEMISPHERE}_{phot_type}"
-        print(f"\n4. Processing phot_type: {phot_type}")
-        phot, err = load_from_fits(FITS_PATH, entries, phot_type, PATCH_ID)
+        print(f"\n4. Processing phot_type: {phot_type}  (prefix: {prefix})")
+        phot, err = load_from_fits(fits_path, entries, phot_type, args.patch_id)
 
         percentiles, mean_sigma, std_sigma, sigma_samples = compute_noise_features(
             phot, err, PERCENTILE_CUTS, SNR_THRESHOLD
         )
-        # Load 5σ depths if the depth file exists alongside this script,
-        # otherwise fall back to the empirical estimator.
-        _depth_file = os.path.join(os.path.dirname(__file__), 'noise_5sighmadepth.py')
+
+        _depth_file = os.path.join(os.path.dirname(__file__), "noise_5sighmadepth.py")
         _depth5_ujy = None
         try:
             import importlib.util as _ilu
-            _spec = _ilu.spec_from_file_location('_depths', _depth_file)
+            _spec = _ilu.spec_from_file_location("_depths", _depth_file)
             _mod = _ilu.module_from_spec(_spec)
             _spec.loader.exec_module(_mod)
             _order = _mod.order
-            _depth5_ujy = np.array([_mod.mag_to_flux_ujy(_mod.depth5_mag[k]) for k in _order],
-                                   dtype=float)
-            print(f'   Using 5σ depths from noise_5sighmadepth.py for limits.')
+            _depth5_ujy = np.array([_mod.mag_to_flux_ujy(_mod.depth5_mag[k]) for k in _order], dtype=float)
+            print(f"   Using 5σ depths from noise_5sighmadepth.py for limits.")
         except Exception as _e:
-            print(f'   WARNING: could not load 5σ depths ({_e}); using empirical fallback.')
+            print(f"   WARNING: could not load 5σ depths ({_e}); using empirical fallback.")
         limits = compute_background_limits(phot, err, SNR_THRESHOLD, depth5_ujy=_depth5_ujy)
 
-        np.save(os.path.join(OUT_DIR, f"lam_eff_{prefix}.npy"), lam_eff)
+        np.save(os.path.join(OUT_DIR, f"lam_eff_{prefix}.npy"),       lam_eff)
         print(f"   ✓ lam_eff_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"percentiles_{prefix}.npy"), percentiles)
+        np.save(os.path.join(OUT_DIR, f"percentiles_{prefix}.npy"),   percentiles)
         print(f"   ✓ percentiles_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"mean_sigma_{prefix}.npy"), mean_sigma)
+        np.save(os.path.join(OUT_DIR, f"mean_sigma_{prefix}.npy"),    mean_sigma)
         print(f"   ✓ mean_sigma_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"std_sigma_{prefix}.npy"), std_sigma)
+        np.save(os.path.join(OUT_DIR, f"std_sigma_{prefix}.npy"),     std_sigma)
         print(f"   ✓ std_sigma_{prefix}.npy")
         np.save(os.path.join(OUT_DIR, f"sigma_samples_{prefix}.npy"), sigma_samples)
         print(f"   ✓ sigma_samples_{prefix}.npy")
-        # background_noise is calibrated from the committed v5.1 values — do not regenerate.
-        # Run:  git restore obs/obs_properties/background_noise_{prefix}.npy
-        # if it was accidentally overwritten.
-        print(f"   (skipping background_noise_{prefix}.npy — use committed git version)")
+        np.save(os.path.join(OUT_DIR, f"background_noise_{prefix}.npy"), limits)
+        print(f"   ✓ background_noise_{prefix}.npy")
         print(f"   Empirical sigma_lim (uJy): {np.array2string(limits, precision=5)}")
 
     print("\n" + "=" * 60)
