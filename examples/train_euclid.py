@@ -120,6 +120,16 @@ def build_parser():
             "Default: auto"
         ),
     )
+    p.add_argument(
+        "--min-det-bands",
+        type=int,
+        default=3,
+        help=(
+            "Keep only mock galaxies with SNR>=3 in at least this many bands before training. "
+            "Removes OOD (sigma=10) galaxies that are below the detection threshold, "
+            "matching the selection of inference targets (default: 3, set 0 to disable)."
+        ),
+    )
     return p
 
 
@@ -474,6 +484,40 @@ sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
+
+# Detection filter: remove OOD mock galaxies (sigma=10 cap) that would never be inferred on.
+# sx.mag shape: (n_gal, n_filt, 2)  — index 0=noisy mag/flux, 1=sigma_mag/sigma_flux
+if args.min_det_bands > 0:
+    _LN10  = np.log(10.0)
+    _obs   = np.asarray(sx.mag[:, :, 0], float)   # (n_gal, n_filt)
+    _sigma = np.asarray(sx.mag[:, :, 1], float)   # (n_gal, n_filt)
+    if args.observation_space == "flux":
+        _snr = np.where(
+            np.isfinite(_obs) & (_obs > 0) & np.isfinite(_sigma) & (_sigma > 0),
+            _obs / _sigma, 0.0)
+    else:
+        _snr = np.where(
+            np.isfinite(_sigma) & (_sigma > 0) & (_sigma < 9.9)
+            & np.isfinite(_obs) & (_obs < 98.5),
+            (2.5 / _LN10) / _sigma, 0.0)
+    _n_det    = (_snr >= SNR_DETECTION_THRESHOLD).sum(axis=1)   # (n_gal,)
+    _det_mask = _n_det >= args.min_det_bands
+
+    n_before = len(sx.theta)
+    sx.theta = sx.theta[_det_mask]
+    sx.mag   = sx.mag[_det_mask]
+    sx.obs   = sx.obs[_det_mask]
+    sx.n_simulation = len(sx.theta)
+
+    print(f"    Detection filter: SNR≥{SNR_DETECTION_THRESHOLD} in ≥{args.min_det_bands} bands")
+    print(f"      Pass: {sx.n_simulation}/{n_before} ({100*sx.n_simulation/max(n_before,1):.1f}%)")
+    if sx.theta.shape[1] >= 8:
+        _z = sx.theta[:, 7]
+        for zlo, zhi in [(0,1),(1,2),(2,3),(3,4),(4,5)]:
+            n_ok = int(((_z >= zlo) & (_z < zhi)).sum())
+            print(f"        z=[{zlo},{zhi}): {n_ok}")
+else:
+    print("    Detection filter disabled (--min-det-bands 0) — OOD galaxies retained")
 
 if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
