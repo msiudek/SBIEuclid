@@ -73,29 +73,6 @@ def build_parser():
         help="Atlas filename in library/ to use for training (default: v2 100k atlas)",
     )
     p.add_argument(
-        "--test-sampler",
-        type=str,
-        default="rejection",
-        choices=["rejection", "mcmc"],
-        help=(
-            "Posterior sampler used for post-training test_performance plot. "
-            "Use 'mcmc' when --sed-calibrate produces concentrated posteriors "
-            "that rejection sampling cannot find (default: rejection)."
-        ),
-    )
-    p.add_argument(
-        "--sed-calibrate",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Apply z-dependent SED brightness correction before noise injection. "
-            "Shifts noiseless mock magnitudes to match real COSMOS-Deep median at "
-            "each z bin (offsets from mag_grid diagnostic): "
-            "z<1→−0.9 mag, z=[1,2)→+1.7, z=[2,3)→+2.4, z≥3→+2.4. "
-            "Corrects M/L ratio mismatch without collapsing the training set."
-        ),
-    )
-    p.add_argument(
         "--z-mass-floor",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -418,28 +395,6 @@ else:
     print("    Z-floor prior: disabled (--no-z-mass-floor)")
 
 # --------------------------------------------------
-# Z-DEPENDENT SED BRIGHTNESS CALIBRATION  (v2.4+)
-# --------------------------------------------------
-# sx.obs holds noiseless AB magnitudes (n_gal, n_filt).
-# Δmag = median(mock) − median(real COSMOS-Deep) measured from mag_grid diagnostic
-# at logM=8-11, templfit, VIS band:  z<1→−0.9  z=[1,2)→+1.7  z=[2,3)→+2.4  z≥3→+2.4
-# Subtracting Δmag from all mock magnitudes shifts brightness to match real data.
-# Applied before noise injection so σ(mag) is also correct after calibration.
-if args.sed_calibrate:
-    _z_cal = sx.theta[:, 7]
-    _delta = np.where(_z_cal < 1.0, -0.9,
-             np.where(_z_cal < 2.0,  1.7,
-             np.where(_z_cal < 3.0,  2.4, 2.4)))
-    sx.obs = sx.obs - _delta[:, None]   # subtract Δmag from all filters
-    _bins = [(0,1,-0.9),(1,2,1.7),(2,3,2.4),(3,5,2.4)]
-    print("    SED calibration applied (Δmag subtracted from noiseless magnitudes):")
-    for zlo, zhi, dm in _bins:
-        n = ((_z_cal >= zlo) & (_z_cal < zhi)).sum()
-        print(f"      z=[{zlo},{zhi}): Δmag={dm:+.1f}  ({n} galaxies)")
-else:
-    print("    SED calibration: disabled (--sed-calibrate to enable)")
-
-# --------------------------------------------------
 # ADD REALISM
 # --------------------------------------------------
 print("[2/5] Adding observational realism...")
@@ -464,10 +419,16 @@ sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
 
 if args.mock_match != "none":
+    if args.observation_space == "flux":
+        print(
+            "    Flux-space mode: disabling mag-based mock matching to keep "
+            "a strict flux-only pipeline."
+        )
+        args.mock_match = "none"
+
+if args.mock_match != "none":
     print(f"    Applying mock matching ({args.mock_match})...")
     real_mag = load_real_mag_for_mock_match(phot_type=args.phot_type)
-    # In flux space sx.mag[:,:,0] holds noisy flux; convert to mag for weight computation.
-    # In mag space sx.mag[:,:,0] holds noisy magnitude directly.
     if args.observation_space == "flux":
         mock_flux = sx.mag[:, :, 0].T
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -604,7 +565,6 @@ posterior = sx.test_performance(
     n_samples=N_POSTERIOR,
     return_posterior=True,
     device=_DEVICE,
-    sample_with=args.test_sampler,
 )
 
 print("Performance test complete!")
