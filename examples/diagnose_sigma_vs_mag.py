@@ -5,23 +5,22 @@ Loads a dbatlas, injects observational noise, applies a detection filter,
 and produces diagnostic plots comparing mock vs real catalogs.
 
 Plots saved to --outdir:
-    sigma_vs_mag_VIS.png   — σ vs VIS mag: mock scatter + model curve + real data
+    coverage.png          — 2D histograms N(z,logM*) and N(z,logsSFR) for real+mock
+    mag_grid.png          — median mag in (z,logM*) cells: real/mock/delta for VIS+NISP-H
+    mag_vs_z.png          — median mag vs z with percentile bands for VIS+NISP-H
+    sigma_grid.png        — median sigma in (z,logM*) cells: real/mock for VIS+NISP-H
+    sigma_vs_z.png        — median sigma vs z with percentile bands for VIS+NISP-H
+    sigma_vs_mag_VIS.png  — scatter sigma vs mag colored by z/logM/logSFR/logsSFR
     sigma_vs_mag_NISP_H.png
-    sigma_vs_z.png         — per-filter median σ vs redshift
-    ssfr_vs_z.png          — sSFR vs redshift: real catalogs vs mock (all + detected)
-    coverage.png           — detection fraction vs z
-    sigma_grid.png         — 2×5 grid of σ vs mag for all 10 bands
-    mag_vs_z.png           — VIS magnitude vs redshift
-    mag_grid.png           — 2×5 grid of magnitude distributions
+    ssfr_vs_z.png         — median sSFR vs z: real catalogs + mock all + mock detected
 
 Usage
 -----
-python examples/diagnose_sigma_vs_mag.py \
-    --atlas atlas_obs_euclid_north_validate_20000_Nparam_2.dbatlas \
-    --phot-type templfit \
-    --catalogs cosmos_deep cosmos_web desi \
-    --min-det-bands 3 \
-    --outdir sbi-logs/diagnose_v1.0 \
+python examples/diagnose_sigma_vs_mag.py \\
+    --atlas atlas_obs_euclid_north_validate_20000_Nparam_2.dbatlas \\
+    --phot-type templfit \\
+    --min-det-bands 3 \\
+    --outdir sbi-logs/diagnose_v1.0 \\
     2>&1 | tee sbi-logs/diagnose_v1.0.log
 """
 
@@ -33,6 +32,8 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sbipix.utils.sed_utils import load_filter_metadata, flux_ujy_to_mag
@@ -46,34 +47,39 @@ FILTER_SHORT = [m["short"]    for m in FILTER_META]
 FILTER_STEMS = [m["col_stem"] for m in FILTER_META]
 N_FILT = len(FILTER_META)
 
-# Catalog paths and reference columns
-# sfr_log=False means the SFR column is in linear units (M☉/yr) and needs log10
+VIS_IDX = FILTER_SHORT.index("VIS")
+H_IDX   = FILTER_SHORT.index("NISP-H")
+
+# 2D cell edges used in mag_grid / sigma_grid
+Z_EDGES = np.arange(0.0, 5.5, 0.5)
+M_EDGES = np.arange(5.0, 12.5, 0.5)
+Z_CEN   = 0.5 * (Z_EDGES[:-1] + Z_EDGES[1:])
+M_CEN   = 0.5 * (M_EDGES[:-1] + M_EDGES[1:])
+
+# z-profile bins (finer, for mag_vs_z / sigma_vs_z)
+ZP_EDGES = np.arange(0.0, 5.25, 0.25)
+ZP_CEN   = 0.5 * (ZP_EDGES[:-1] + ZP_EDGES[1:])
+
 CATALOG_INFO = {
     "cosmos_deep": {
-        "path": OBS_DIR / "COSMOS_DEEP_PHZ.fits",
-        "z_col":    "PHZ_PP_MEDIAN_REDSHIFT",
-        "mass_col": "PHZ_PP_MEDIAN_STELLARMASS",   # already log10
-        "sfr_col":  "PHZ_PP_MEDIAN_SFR",           # linear M☉/yr → log10 below
-        "sfr_log":  False,
+        "path":    OBS_DIR / "COSMOS_DEEP_PHZ.fits",
+        "z_col":   "PHZ_PP_MEDIAN_REDSHIFT",
+        "mass_col":"PHZ_PP_MEDIAN_STELLARMASS",
+        "sfr_col": "PHZ_PP_MEDIAN_SFR",
+        "sfr_log": False,
+        "label":   "COSMOS-Deep",
+        "color":   "#1f77b4",
     },
     "cosmos_web": {
-        "path": OBS_DIR / "COSMOS-Web" / "matched_euclid_cosmosweb.fits",
-        "z_col":    "z_lephare",
-        "mass_col": "logM_lephare",
-        "sfr_col":  "logSFR_lephare",
-        "sfr_log":  True,
-    },
-    "desi": {
-        "path": OBS_DIR / "COSMOS-DESI" / "matched_euclid_desi.fits",
-        "z_col":    "z_desi",
-        "mass_col": "logM_desi_Cigale",
-        "sfr_col":  "logSFR_desi_Cigale",
-        "sfr_log":  True,
+        "path":    OBS_DIR / "COSMOS-Web" / "matched_euclid_cosmosweb.fits",
+        "z_col":   "z_lephare",
+        "mass_col":"logM_lephare",
+        "sfr_col": "logSFR_lephare",
+        "sfr_log": True,
+        "label":   "COSMOS-Web",
+        "color":   "#ff7f0e",
     },
 }
-
-CAT_COLORS = {"cosmos_deep": "#1f77b4", "cosmos_web": "#ff7f0e", "desi": "#2ca02c"}
-CAT_LABELS = {"cosmos_deep": "COSMOS-Deep", "cosmos_web": "COSMOS-Web", "desi": "COSMOS-DESI"}
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -86,378 +92,139 @@ def build_phot_col(stem, phot_type, err=False):
 
 
 def load_catalog(cat_key, phot_type):
-    """Load a catalog and return flux, fluxerr (n_gal, n_filt), z, logM, logSFR."""
     from astropy.table import Table
     info = CATALOG_INFO[cat_key]
-    cat = Table.read(info["path"])
-    print(f"  [{cat_key}] Loading: {info['path'].name}")
+    cat  = Table.read(info["path"])
+    print(f"  [{cat_key}] {len(cat):,} rows")
 
-    z = np.array(cat[info["z_col"]], dtype=float) if info["z_col"] in cat.colnames else np.full(len(cat), np.nan)
-
-    logM = np.full(len(cat), np.nan)
-    if info["mass_col"] in cat.colnames:
-        logM = np.array(cat[info["mass_col"]], dtype=float)
+    z    = np.array(cat[info["z_col"]],    dtype=float) if info["z_col"]    in cat.colnames else np.full(len(cat), np.nan)
+    logM = np.array(cat[info["mass_col"]], dtype=float) if info["mass_col"] in cat.colnames else np.full(len(cat), np.nan)
 
     logSFR = np.full(len(cat), np.nan)
     if info["sfr_col"] in cat.colnames:
-        raw_sfr = np.array(cat[info["sfr_col"]], dtype=float)
-        if info.get("sfr_log", True):
-            logSFR = raw_sfr
-        else:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                logSFR = np.where(raw_sfr > 0, np.log10(raw_sfr), np.nan)
+        raw = np.array(cat[info["sfr_col"]], dtype=float)
+        logSFR = raw if info["sfr_log"] else np.where(raw > 0, np.log10(raw), np.nan)
+
+    logsSFR = np.where(np.isfinite(logM) & (logM > 0) & np.isfinite(logSFR),
+                       logSFR - logM, np.nan)
 
     flux_cols    = [build_phot_col(s, phot_type, err=False) for s in FILTER_STEMS]
     fluxerr_cols = [build_phot_col(s, phot_type, err=True)  for s in FILTER_STEMS]
 
-    available_f  = [c for c in flux_cols    if c in cat.colnames]
-    available_fe = [c for c in fluxerr_cols if c in cat.colnames]
-
-    if len(available_f) < N_FILT or len(available_fe) < N_FILT:
-        print(f"    WARNING: only {len(available_f)}/{N_FILT} flux cols available — skipping flux load")
+    if any(c not in cat.colnames for c in flux_cols):
+        missing = [c for c in flux_cols if c not in cat.colnames]
+        print(f"    WARNING: missing flux cols: {missing[:3]}; skipping")
         return None
 
     flux    = np.column_stack([np.array(cat[c], dtype=float) for c in flux_cols])
     fluxerr = np.column_stack([np.array(cat[c], dtype=float) for c in fluxerr_cols])
 
-    z_valid = np.isfinite(z) & (z > 0) & (z < 15)
-    print(f"    N={len(cat):,}  z_valid={z_valid.sum():,}  "
-          f"z=[{z[z_valid].min():.2f},{z[z_valid].max():.2f}]  "
-          f"logM=[{np.nanmin(logM):.1f},{np.nanmax(logM):.1f}]")
-    return {"flux": flux, "fluxerr": fluxerr, "z": z, "logM": logM, "logSFR": logSFR}
+    return {"flux": flux, "fluxerr": fluxerr,
+            "z": z, "logM": logM, "logSFR": logSFR, "logsSFR": logsSFR,
+            "label": info["label"], "color": info["color"]}
 
 
-def flux_to_mag(flux_ujy):
-    """Convert flux in µJy to AB magnitude; returns 99.0 for non-detections."""
+def real_mag_sigma(flux_col, fluxerr_col):
+    """Per-galaxy AB magnitude and sigma_mag from flux/fluxerr (µJy)."""
     with np.errstate(divide="ignore", invalid="ignore"):
-        mag = np.where(
-            np.isfinite(flux_ujy) & (flux_ujy > 0),
-            -2.5 * np.log10(flux_ujy / 3631e6),
-            99.0,
-        )
-    return mag
+        mag = np.where(np.isfinite(flux_col) & (flux_col > 0),
+                       -2.5 * np.log10(np.maximum(flux_col, 1e-30) / 3631e6), np.nan)
+        sig = np.where(np.isfinite(flux_col) & (flux_col > 0) &
+                       np.isfinite(fluxerr_col) & (fluxerr_col > 0),
+                       (2.5 / np.log(10)) * np.abs(fluxerr_col / flux_col), np.nan)
+    return mag, sig
 
 
-def inject_noise_and_detect(sx, atlas_sed, atlas_z, min_det_bands):
-    """Inject noise into atlas SEDs via sbipix API; return sigma_mag, flux_noisy, det_mask."""
-    n_gal = atlas_sed.shape[0]
-
-    # Set atlas SEDs as noiseless magnitudes in sbipix
-    sx.obs = flux_to_mag(atlas_sed)          # (n_gal, n_filt) magnitude array
-    sx.n_simulation = n_gal
-
-    print(f"  Injecting noise...")
-    sx.add_noise_nan_limit_all()             # fills sx.mag (n_gal, n_filt, 2)
-
-    noisy_mag = sx.mag[:, :, 0]             # (n_gal, n_filt)
-    sigma_mag  = sx.mag[:, :, 1]            # (n_gal, n_filt)
-
-    # Convert noisy magnitude back to flux for plots
-    with np.errstate(divide="ignore", invalid="ignore"):
-        flux_noisy = np.where(
-            np.isfinite(noisy_mag) & (noisy_mag < 98.0),
-            3631e6 * 10 ** (-0.4 * noisy_mag),
-            0.0,
-        )
-
-    # Non-detections have noisy_mag = 99.0 (mag-space output)
-    detected = (noisy_mag < 98.0) & np.isfinite(noisy_mag)
-    n_det = np.sum(detected, axis=1)
-    det_mask = n_det >= min_det_bands if min_det_bands > 0 else np.ones(n_gal, dtype=bool)
-
-    return sigma_mag, flux_noisy, det_mask
+def cell_median(values, z, logm, min_count=3):
+    """Median of values in (Z_EDGES, M_EDGES) cells → shape (n_m, n_z)."""
+    nz, nm = len(Z_EDGES)-1, len(M_EDGES)-1
+    grid = np.full((nm, nz), np.nan)
+    for iz in range(nz):
+        for im in range(nm):
+            mask = ((z  >= Z_EDGES[iz]) & (z  < Z_EDGES[iz+1]) &
+                    (logm >= M_EDGES[im]) & (logm < M_EDGES[im+1]) &
+                    np.isfinite(values))
+            if mask.sum() >= min_count:
+                grid[im, iz] = np.nanmedian(values[mask])
+    return grid
 
 
-def get_sigma_from_real(flux, fluxerr):
-    """Compute σ_mag = (2.5/ln10) * fluxerr/flux for real detected galaxies."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        sigma = (2.5 / np.log(10)) * np.abs(fluxerr / np.where(flux > 0, flux, np.nan))
-    sigma[~np.isfinite(sigma)] = np.nan
-    return sigma
+def cell_count(z, logm):
+    """Count in (Z_EDGES, M_EDGES) cells → shape (n_m, n_z)."""
+    nz, nm = len(Z_EDGES)-1, len(M_EDGES)-1
+    grid = np.zeros((nm, nz), dtype=int)
+    for iz in range(nz):
+        for im in range(nm):
+            mask = ((z  >= Z_EDGES[iz]) & (z  < Z_EDGES[iz+1]) &
+                    (logm >= M_EDGES[im]) & (logm < M_EDGES[im+1]))
+            grid[im, iz] = mask.sum()
+    return grid
 
 
-# ── plots ──────────────────────────────────────────────────────────────────
-
-def plot_sigma_vs_mag_single(filt_idx, filt_name, mock_sigma, mock_flux,
-                              real_cats, outdir, tag=""):
-    """σ_mag vs magnitude for one filter."""
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    # real catalogs
-    for key, cat in real_cats.items():
-        if cat is None:
-            continue
-        f  = cat["flux"][:, filt_idx]
-        fe = cat["fluxerr"][:, filt_idx]
-        ok = (f > 0) & (fe > 0) & np.isfinite(f) & np.isfinite(fe)
-        if ok.sum() < 5:
-            continue
-        mag_r = flux_ujy_to_mag(f[ok])
-        sig_r = get_sigma_from_real(f[ok], fe[ok])
-        ok2 = np.isfinite(mag_r) & np.isfinite(sig_r) & (sig_r > 0) & (sig_r < 5)
-        ax.scatter(mag_r[ok2], sig_r[ok2], s=1, alpha=0.15,
-                   color=CAT_COLORS[key], label=CAT_LABELS[key], rasterized=True)
-
-    # mock atlas
-    ok_m = (mock_flux[:, filt_idx] > 0) & np.isfinite(mock_sigma[:, filt_idx])
-    if ok_m.sum() > 0:
-        mag_m = flux_ujy_to_mag(mock_flux[ok_m, filt_idx])
-        sig_m = mock_sigma[ok_m, filt_idx]
-        ok2   = np.isfinite(mag_m) & np.isfinite(sig_m) & (sig_m > 0) & (sig_m < 5)
-        ax.scatter(mag_m[ok2], sig_m[ok2], s=1, alpha=0.2,
-                   color="k", label="Mock atlas", rasterized=True)
-        # running median
-        mbins = np.linspace(np.nanpercentile(mag_m[ok2], 1), np.nanpercentile(mag_m[ok2], 99), 30)
-        mcen  = 0.5 * (mbins[:-1] + mbins[1:])
-        med   = [np.nanmedian(sig_m[ok2][(mag_m[ok2] >= lo) & (mag_m[ok2] < hi)])
-                 for lo, hi in zip(mbins[:-1], mbins[1:])]
-        ax.plot(mcen, med, "k-", lw=2, label="Mock median")
-
-    ax.set_xlabel(f"{filt_name} magnitude (AB)", fontsize=11)
-    ax.set_ylabel(r"$\sigma_{\rm mag}$", fontsize=11)
-    ax.set_xlim(17, 32)
-    ax.set_ylim(0, 2.0)
-    ax.legend(fontsize=8, markerscale=5)
-    ax.set_title(f"{filt_name}{tag}")
-    fig.tight_layout()
-    fname = outdir / f"sigma_vs_mag_{filt_name.replace('-','_')}.png"
-    fig.savefig(fname, dpi=120)
-    plt.close(fig)
-    print(f"  Saved: {fname.name}")
+def zprofile(values, z, pcts=(16, 50, 84)):
+    """Percentile profiles in ZP_EDGES bins. Returns (n_bins, n_pcts) where nan = no data."""
+    result = np.full((len(ZP_CEN), len(pcts)), np.nan)
+    for i, (lo, hi) in enumerate(zip(ZP_EDGES[:-1], ZP_EDGES[1:])):
+        m = np.isfinite(values) & np.isfinite(z) & (z >= lo) & (z < hi)
+        if m.sum() >= 5:
+            result[i] = np.percentile(values[m], pcts)
+    return result
 
 
-def plot_sigma_grid(mock_sigma, mock_flux, det_mask, real_cats, outdir):
-    """2×5 grid of σ vs mag for all 10 bands."""
-    fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharey=True)
-    axes = axes.flatten()
-
-    for j, (ax, fname) in enumerate(zip(axes, FILTER_SHORT)):
-        # real catalogs
-        for key, cat in real_cats.items():
-            if cat is None:
-                continue
-            f  = cat["flux"][:, j]
-            fe = cat["fluxerr"][:, j]
-            ok = (f > 0) & (fe > 0) & np.isfinite(f) & np.isfinite(fe)
-            if ok.sum() < 5:
-                continue
-            mag_r = flux_ujy_to_mag(f[ok])
-            sig_r = get_sigma_from_real(f[ok], fe[ok])
-            ok2   = np.isfinite(mag_r) & np.isfinite(sig_r) & (sig_r > 0) & (sig_r < 5)
-            ax.scatter(mag_r[ok2], sig_r[ok2], s=0.5, alpha=0.1,
-                       color=CAT_COLORS[key], rasterized=True)
-
-        # mock atlas (all)
-        ok_m = (mock_flux[:, j] > 0) & np.isfinite(mock_sigma[:, j])
-        if ok_m.sum() > 0:
-            mag_m = flux_ujy_to_mag(mock_flux[ok_m, j])
-            sig_m = mock_sigma[ok_m, j]
-            ok2   = np.isfinite(mag_m) & np.isfinite(sig_m) & (sig_m > 0) & (sig_m < 5)
-            mbins = np.linspace(np.nanpercentile(mag_m[ok2], 1), np.nanpercentile(mag_m[ok2], 99), 25)
-            mcen  = 0.5 * (mbins[:-1] + mbins[1:])
-            med   = [np.nanmedian(sig_m[ok2][(mag_m[ok2] >= lo) & (mag_m[ok2] < hi)])
-                     for lo, hi in zip(mbins[:-1], mbins[1:])]
-            ax.plot(mcen, med, "k-", lw=1.5)
-
-        ax.set_title(fname, fontsize=9)
-        ax.set_xlim(17, 32)
-        ax.set_ylim(0, 2.5)
-        ax.tick_params(labelsize=7)
-
-    for ax in axes[::5]:
-        ax.set_ylabel(r"$\sigma_{\rm mag}$", fontsize=8)
-    for ax in axes[5:]:
-        ax.set_xlabel("mag (AB)", fontsize=7)
-
-    # legend on last panel
-    from matplotlib.lines import Line2D
-    handles = [Line2D([0],[0], color=CAT_COLORS[k], lw=2, label=CAT_LABELS[k])
-               for k in CAT_COLORS if k in real_cats and real_cats[k] is not None]
-    handles.append(Line2D([0],[0], color="k", lw=2, label="Mock median"))
-    axes[-1].legend(handles=handles, fontsize=7)
-
-    fig.suptitle("σ vs magnitude — all filters", fontsize=12)
-    fig.tight_layout()
-    out = outdir / "sigma_grid.png"
-    fig.savefig(out, dpi=120)
-    plt.close(fig)
-    print(f"  Saved: {out.name}")
+def _heatmap(ax, grid, x_edges, y_edges, cmap, norm, min_count_grid=None):
+    """pcolormesh with NaN for empty cells."""
+    disp = grid.copy().astype(float)
+    if min_count_grid is not None:
+        disp[min_count_grid < 1] = np.nan
+    pcm = ax.pcolormesh(x_edges, y_edges, disp, cmap=cmap, norm=norm)
+    return pcm
 
 
-def plot_mag_grid(mock_flux, det_mask, real_cats, outdir):
-    """2×5 grid of magnitude distributions (real vs mock all vs mock detected)."""
-    fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharey=False)
-    axes = axes.flatten()
+# ── coverage ───────────────────────────────────────────────────────────────
 
-    for j, (ax, fname) in enumerate(zip(axes, FILTER_SHORT)):
-        bins = np.linspace(16, 32, 40)
-        for key, cat in real_cats.items():
-            if cat is None:
-                continue
-            f = cat["flux"][:, j]
-            ok = (f > 0) & np.isfinite(f)
-            if ok.sum() < 5:
-                continue
-            mag_r = flux_ujy_to_mag(f[ok])
-            ok2   = np.isfinite(mag_r)
-            ax.hist(mag_r[ok2], bins=bins, density=True, histtype="step",
-                    color=CAT_COLORS[key], lw=1.2, label=CAT_LABELS[key])
+def plot_coverage(real_cats, mock_z, mock_logM, mock_logSFR, outdir):
+    z_e  = np.linspace(0, 5, 51)
+    m_e  = np.linspace(5, 12, 51)
+    ss_e = np.linspace(-14, -7, 51)
 
-        # mock all
-        f_m = mock_flux[:, j]
-        ok_m = (f_m > 0) & np.isfinite(f_m)
-        if ok_m.sum() > 5:
-            mag_m = flux_ujy_to_mag(f_m[ok_m])
-            ok2   = np.isfinite(mag_m)
-            ax.hist(mag_m[ok2], bins=bins, density=True, histtype="step",
-                    color="k", lw=1.2, ls="--", label="Mock all")
+    sources = []
+    for key in ["cosmos_deep", "cosmos_web"]:
+        if key in real_cats and real_cats[key] is not None:
+            c = real_cats[key]
+            sources.append((c["label"], c["color"], c["z"], c["logM"], c["logsSFR"]))
 
-        # mock detected
-        ok_d = ok_m & det_mask
-        if ok_d.sum() > 5:
-            mag_d = flux_ujy_to_mag(f_m[ok_d])
-            ok2   = np.isfinite(mag_d)
-            ax.hist(mag_d[ok2], bins=bins, density=True, histtype="step",
-                    color="gray", lw=1.2, ls=":", label="Mock det")
+    mock_logsSFR = np.where(np.isfinite(mock_logM) & (mock_logM > 0) & np.isfinite(mock_logSFR),
+                            mock_logSFR - mock_logM, np.nan)
+    sources.append(("mock", "k", mock_z, mock_logM, mock_logsSFR))
 
-        ax.set_title(fname, fontsize=9)
-        ax.set_xlim(16, 32)
-        ax.tick_params(labelsize=7)
+    fig, axes = plt.subplots(2, len(sources), figsize=(5*len(sources), 9))
+    if axes.ndim == 1:
+        axes = axes.reshape(2, -1)
+    norm_n = mcolors.LogNorm(vmin=1, vmax=1e4)
 
-    for ax in axes[5:]:
-        ax.set_xlabel("mag (AB)", fontsize=7)
-    for ax in axes[::5]:
-        ax.set_ylabel("density", fontsize=8)
+    for col, (lbl, col_c, z, logm, logssfr) in enumerate(sources):
+        ok_m  = np.isfinite(z) & (z >= 0) & np.isfinite(logm)
+        ok_ss = np.isfinite(z) & (z >= 0) & np.isfinite(logssfr)
 
-    from matplotlib.lines import Line2D
-    handles  = [Line2D([0],[0], color=CAT_COLORS[k], lw=2, label=CAT_LABELS[k])
-                for k in CAT_COLORS if k in real_cats and real_cats[k] is not None]
-    handles += [Line2D([0],[0], color="k", ls="--", lw=2, label="Mock all"),
-                Line2D([0],[0], color="gray", ls=":", lw=2, label="Mock det")]
-    axes[-1].legend(handles=handles, fontsize=7)
+        h_m,  _, _ = np.histogram2d(z[ok_m],  logm[ok_m],    bins=[z_e, m_e])
+        h_ss, _, _ = np.histogram2d(z[ok_ss], logssfr[ok_ss], bins=[z_e, ss_e])
+        h_m  = np.where(h_m  > 0, h_m,  np.nan)
+        h_ss = np.where(h_ss > 0, h_ss, np.nan)
 
-    fig.suptitle("Magnitude distributions — all filters", fontsize=12)
-    fig.tight_layout()
-    out = outdir / "mag_grid.png"
-    fig.savefig(out, dpi=120)
-    plt.close(fig)
-    print(f"  Saved: {out.name}")
+        pcm0 = axes[0, col].pcolormesh(z_e, m_e,  h_m.T,  cmap="viridis", norm=norm_n)
+        pcm1 = axes[1, col].pcolormesh(z_e, ss_e, h_ss.T, cmap="viridis", norm=norm_n)
+        for ax in [axes[0,col], axes[1,col]]:
+            ax.set_xlabel("z", fontsize=10)
+            ax.set_xlim(0, 5)
+        axes[0, col].set_ylabel(r"$\log M_*$", fontsize=10)
+        axes[1, col].set_ylabel(r"$\log$ sSFR", fontsize=10)
+        axes[0, col].set_ylim(5, 12)
+        axes[1, col].set_ylim(-14, -7)
+        axes[0, col].set_title(lbl, fontsize=11)
+        plt.colorbar(pcm0, ax=axes[0,col], label="N")
+        plt.colorbar(pcm1, ax=axes[1,col], label="N")
 
-
-def plot_mag_vs_z(mock_flux, mock_z, det_mask, real_cats, outdir):
-    """VIS magnitude vs redshift."""
-    vis_idx = FILTER_SHORT.index("VIS")
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    for key, cat in real_cats.items():
-        if cat is None:
-            continue
-        f = cat["flux"][:, vis_idx]
-        z = cat["z"]
-        ok = (f > 0) & np.isfinite(f) & np.isfinite(z) & (z > 0)
-        mag_r = flux_ujy_to_mag(f[ok])
-        ok2 = np.isfinite(mag_r)
-        ax.scatter(z[ok][ok2], mag_r[ok2], s=1, alpha=0.1,
-                   color=CAT_COLORS[key], label=CAT_LABELS[key], rasterized=True)
-
-    # mock detected
-    ok_d = det_mask & (mock_flux[:, vis_idx] > 0) & np.isfinite(mock_flux[:, vis_idx])
-    if ok_d.sum() > 0:
-        mag_d = flux_ujy_to_mag(mock_flux[ok_d, vis_idx])
-        ok2   = np.isfinite(mag_d)
-        ax.scatter(mock_z[ok_d][ok2], mag_d[ok2], s=1, alpha=0.15,
-                   color="k", label="Mock detected", rasterized=True)
-
-    ax.set_xlabel("Redshift", fontsize=11)
-    ax.set_ylabel("VIS magnitude (AB)", fontsize=11)
-    ax.set_xlim(0, 5)
-    ax.set_ylim(17, 32)
-    ax.legend(fontsize=9, markerscale=5)
-    ax.set_title("VIS mag vs redshift")
-    fig.tight_layout()
-    out = outdir / "mag_vs_z.png"
-    fig.savefig(out, dpi=120)
-    plt.close(fig)
-    print(f"  Saved: {out.name}")
-
-
-def plot_sigma_vs_z(mock_sigma, mock_z, det_mask, real_cats, outdir):
-    """Per-filter median σ vs redshift (real + mock detected)."""
-    z_bins = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
-    z_cen  = 0.5 * (z_bins[:-1] + z_bins[1:])
-
-    fig, axes = plt.subplots(2, 5, figsize=(18, 7), sharey=False)
-    axes = axes.flatten()
-
-    for j, (ax, fname) in enumerate(zip(axes, FILTER_SHORT)):
-        for key, cat in real_cats.items():
-            if cat is None:
-                continue
-            f  = cat["flux"][:, j]
-            fe = cat["fluxerr"][:, j]
-            z  = cat["z"]
-            ok = (f > 0) & (fe > 0) & np.isfinite(f) & np.isfinite(fe) & np.isfinite(z) & (z > 0)
-            if ok.sum() < 10:
-                continue
-            sig_r = get_sigma_from_real(f[ok], fe[ok])
-            med = [np.nanmedian(sig_r[(z[ok] >= lo) & (z[ok] < hi) & np.isfinite(sig_r)])
-                   for lo, hi in zip(z_bins[:-1], z_bins[1:])]
-            ax.plot(z_cen, med, "o-", ms=4, color=CAT_COLORS[key], label=CAT_LABELS[key])
-
-        # mock detected
-        ok_d = det_mask & np.isfinite(mock_z) & (mock_z > 0)
-        if ok_d.sum() > 10:
-            sig_m = mock_sigma[ok_d, j]
-            z_d   = mock_z[ok_d]
-            med_m = [np.nanmedian(sig_m[(z_d >= lo) & (z_d < hi) & np.isfinite(sig_m)])
-                     for lo, hi in zip(z_bins[:-1], z_bins[1:])]
-            ax.plot(z_cen, med_m, "s--", ms=4, color="k", label="Mock det")
-
-        ax.set_title(fname, fontsize=9)
-        ax.set_xlim(0, 5)
-        ax.set_ylim(0, 1.5)
-        ax.tick_params(labelsize=7)
-
-    for ax in axes[5:]:
-        ax.set_xlabel("Redshift", fontsize=7)
-    for ax in axes[::5]:
-        ax.set_ylabel(r"median $\sigma_{\rm mag}$", fontsize=8)
-
-    from matplotlib.lines import Line2D
-    handles  = [Line2D([0],[0], color=CAT_COLORS[k], lw=2, label=CAT_LABELS[k])
-                for k in CAT_COLORS if k in real_cats and real_cats[k] is not None]
-    handles.append(Line2D([0],[0], color="k", ls="--", lw=2, label="Mock detected"))
-    axes[-1].legend(handles=handles, fontsize=7)
-
-    fig.suptitle(r"Median $\sigma_{\rm mag}$ vs redshift", fontsize=12)
-    fig.tight_layout()
-    out = outdir / "sigma_vs_z.png"
-    fig.savefig(out, dpi=120)
-    plt.close(fig)
-    print(f"  Saved: {out.name}")
-
-
-def plot_coverage(mock_z, det_mask, real_cats, outdir):
-    """Detection fraction vs redshift for mock and real catalogs."""
-    z_bins = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
-    z_cen  = 0.5 * (z_bins[:-1] + z_bins[1:])
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    # mock
-    ok_z = np.isfinite(mock_z) & (mock_z > 0) & (mock_z < 5)
-    frac_m = []
-    for lo, hi in zip(z_bins[:-1], z_bins[1:]):
-        in_bin = ok_z & (mock_z >= lo) & (mock_z < hi)
-        frac_m.append(det_mask[in_bin].mean() if in_bin.sum() > 0 else np.nan)
-    ax.plot(z_cen, frac_m, "k-o", ms=5, label="Mock atlas")
-
-    ax.set_xlabel("Redshift", fontsize=11)
-    ax.set_ylabel("Detection fraction", fontsize=11)
-    ax.set_xlim(0, 5)
-    ax.set_ylim(0, 1)
-    ax.legend(fontsize=9)
-    ax.set_title(f"Detection fraction vs z (SNR≥3, ≥{args_global.min_det_bands} bands)")
+    fig.suptitle("Parameter coverage", fontsize=13)
     fig.tight_layout()
     out = outdir / "coverage.png"
     fig.savefig(out, dpi=120)
@@ -465,68 +232,390 @@ def plot_coverage(mock_z, det_mask, real_cats, outdir):
     print(f"  Saved: {out.name}")
 
 
-def plot_ssfr_vs_z(real_cats, mock_theta, det_mask, outdir):
-    """sSFR vs redshift: real catalogs vs mock (all + detected)."""
-    z_bins = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
-    z_cen  = 0.5 * (z_bins[:-1] + z_bins[1:])
+# ── mag_grid ───────────────────────────────────────────────────────────────
 
-    def _profile(ssfr, z):
-        med = np.full(len(z_cen), np.nan)
-        p16 = np.full(len(z_cen), np.nan)
-        p84 = np.full(len(z_cen), np.nan)
-        for i, (lo, hi) in enumerate(zip(z_bins[:-1], z_bins[1:])):
-            m = np.isfinite(ssfr) & np.isfinite(z) & (z >= lo) & (z < hi) & (ssfr > -15) & (ssfr < 0)
-            if m.sum() >= 5:
-                med[i], p16[i], p84[i] = np.percentile(ssfr[m], [50, 16, 84])
-        return med, p16, p84
+def plot_mag_grid(real_cd, noiseless_mag, noisy_mag, det_mask,
+                  mock_z, mock_logM, outdir):
+    """2 rows (VIS, NISP-H) × 6 cols: real | noiseless | noisy | Δnoisy | det | Δdet."""
+    bands = [(VIS_IDX, "VIS"), (H_IDX, "NISP-H")]
+    col_titles = ["COSMOS-Deep (real)",
+                  "mock noiseless SED",
+                  "mock noisy",
+                  "Δmag noisy − COSMOS-Deep",
+                  f"mock (≥{MIN_DET_BANDS} det)",
+                  f"Δmag filtered − COSMOS-Deep"]
 
-    def _ms_ssfr(z):
-        # Schreiber+15 approximate main sequence sSFR
-        coeff = np.where(z < 1, 1.0, np.where(z < 2, 2.0, 2.8))
-        return -10.0 + coeff * np.log10(1 + z)
+    mag_norm  = mcolors.Normalize(vmin=18, vmax=28)
+    diff_norm = mcolors.Normalize(vmin=-3, vmax=3)
+    mag_cmap  = "plasma"
+    diff_cmap = "RdBu_r"
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, axes = plt.subplots(2, 6, figsize=(26, 8))
+    fig.suptitle(
+        "Median AB magnitude in (z, log M*) cells — COSMOS-Deep | mock noiseless | mock noisy | Δ(mock−real)\n"
+        "Δ > 0 = mock fainter → SED issue;  Δ = 0 + high σ → noise model issue",
+        fontsize=10)
 
-    for key, cat in real_cats.items():
-        if cat is None:
+    for row, (fi, fname) in enumerate(bands):
+        # real mag in cells
+        real_z = real_cd["z"]; real_logM = real_cd["logM"]
+        real_flux = real_cd["flux"][:, fi]
+        ok_r = (real_flux > 0) & np.isfinite(real_flux) & np.isfinite(real_z) & np.isfinite(real_logM)
+        real_mag_all = np.where(ok_r, flux_ujy_to_mag(np.maximum(real_flux, 1e-30)), np.nan)
+        grid_real  = cell_median(real_mag_all, real_z, real_logM)
+
+        # mock: noiseless magnitude in cells
+        nl_mag = flux_ujy_to_mag(np.maximum(noiseless_mag[:, fi], 1e-30))
+        ok_nl  = noiseless_mag[:, fi] > 0
+        nl_mag_use = np.where(ok_nl, nl_mag, np.nan)
+        grid_nl = cell_median(nl_mag_use, mock_z, mock_logM)
+
+        # mock: noisy mag in cells (all, non-det = 99 → exclude)
+        nm_use = np.where(noisy_mag[:, fi] < 98.0, noisy_mag[:, fi], np.nan)
+        grid_noisy = cell_median(nm_use, mock_z, mock_logM)
+
+        # mock: noisy mag (det only)
+        nm_det = np.where(det_mask & (noisy_mag[:, fi] < 98.0), noisy_mag[:, fi], np.nan)
+        grid_det = cell_median(nm_det, mock_z, mock_logM)
+
+        grids = [grid_real, grid_nl, grid_noisy,
+                 grid_noisy - grid_real, grid_det,
+                 grid_det - grid_real]
+        cmaps = [mag_cmap, mag_cmap, mag_cmap, diff_cmap, mag_cmap, diff_cmap]
+        norms = [mag_norm,  mag_norm,  mag_norm,  diff_norm,  mag_norm,  diff_norm]
+
+        for col, (g, cm, nm) in enumerate(zip(grids, cmaps, norms)):
+            ax = axes[row, col]
+            cnt = cell_count(
+                real_z if col == 0 else mock_z,
+                real_logM if col == 0 else mock_logM,
+            )
+            pcm = _heatmap(ax, g, Z_EDGES, M_EDGES, cm, nm, min_count_grid=cnt)
+            plt.colorbar(pcm, ax=ax, label="AB mag" if col < 3 or col == 4 else "Δ AB mag")
+            ax.set_xlim(0, 5); ax.set_ylim(5, 12)
+            ax.set_xlabel("z", fontsize=8)
+            ax.set_ylabel(r"$\log M_*$", fontsize=8)
+            ax.set_title(f"{fname} {col_titles[col]}", fontsize=8)
+            ax.tick_params(labelsize=7)
+
+    fig.tight_layout()
+    out = outdir / "mag_grid.png"
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+    print(f"  Saved: {out.name}")
+
+
+# ── mag_vs_z ───────────────────────────────────────────────────────────────
+
+def plot_mag_vs_z(real_cats, noiseless_mag, noisy_mag, det_mask, mock_z, outdir):
+    """Median magnitude vs redshift for VIS and NISP-H."""
+    bands = [(VIS_IDX, "VIS"), (H_IDX, "NISP-H")]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=False)
+    fig.suptitle(
+        "Median AB magnitude vs redshift\n"
+        "mock above real → SED too faint (SED issue);  mock ≈ real but σ high → noise model issue",
+        fontsize=11)
+
+    for ax, (fi, fname) in zip(axes, bands):
+        # real catalogs
+        for key in ["cosmos_deep", "cosmos_web"]:
+            c = real_cats.get(key)
+            if c is None:
+                continue
+            f_ok = c["flux"][:, fi] > 0
+            mag_r = np.where(f_ok, flux_ujy_to_mag(np.maximum(c["flux"][:, fi], 1e-30)), np.nan)
+            ok = np.isfinite(mag_r) & np.isfinite(c["z"]) & (c["z"] > 0)
+            prof = zprofile(mag_r[ok], c["z"][ok])
+            ls = "-" if key == "cosmos_deep" else "--"
+            ax.plot(ZP_CEN, prof[:, 1], color=c["color"], ls=ls, lw=2, label=c["label"])
+            ax.fill_between(ZP_CEN, prof[:, 0], prof[:, 2], alpha=0.2, color=c["color"])
+
+        ok_z = np.isfinite(mock_z) & (mock_z > 0)
+
+        # mock noiseless
+        nl_mag = np.where(noiseless_mag[:, fi] > 0,
+                          flux_ujy_to_mag(np.maximum(noiseless_mag[:, fi], 1e-30)), np.nan)
+        ok_nl = ok_z & np.isfinite(nl_mag)
+        prof_nl = zprofile(nl_mag[ok_nl], mock_z[ok_nl])
+        ax.plot(ZP_CEN, prof_nl[:, 1], color="purple", ls=":", lw=1.5, label="mock (noiseless SED)")
+        ax.fill_between(ZP_CEN, prof_nl[:, 0], prof_nl[:, 2], alpha=0.10, color="purple")
+
+        # mock noisy all
+        nm_all = np.where(noisy_mag[:, fi] < 98.0, noisy_mag[:, fi], np.nan)
+        ok_na  = ok_z & np.isfinite(nm_all)
+        prof_na = zprofile(nm_all[ok_na], mock_z[ok_na])
+        ax.plot(ZP_CEN, prof_na[:, 1], color="#e6693a", ls="--", lw=1.5, label="mock noisy (all)")
+        ax.fill_between(ZP_CEN, prof_na[:, 0], prof_na[:, 2], alpha=0.10, color="#e6693a")
+
+        # mock noisy detected
+        nm_det = np.where(det_mask & (noisy_mag[:, fi] < 98.0), noisy_mag[:, fi], np.nan)
+        ok_nd  = ok_z & np.isfinite(nm_det)
+        prof_nd = zprofile(nm_det[ok_nd], mock_z[ok_nd])
+        ax.plot(ZP_CEN, prof_nd[:, 1], color="#c0392b", ls="-", lw=2.5,
+                label=f"mock (≥{MIN_DET_BANDS} det bands)")
+        ax.fill_between(ZP_CEN, prof_nd[:, 0], prof_nd[:, 2], alpha=0.15, color="#c0392b")
+
+        ax.set_xlabel("Redshift z", fontsize=11)
+        ax.set_ylabel("AB magnitude (median, lower = brighter)", fontsize=10)
+        ax.set_title(fname, fontsize=12)
+        ax.set_xlim(0, 5)
+        ax.invert_yaxis()
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    out = outdir / "mag_vs_z.png"
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"  Saved: {out.name}")
+
+
+# ── sigma_grid ─────────────────────────────────────────────────────────────
+
+def plot_sigma_grid(real_cd, mock_sigma, det_mask, mock_z, mock_logM, outdir):
+    """2 rows (VIS, NISP-H) × 6 cols: real σ | real N | mock-all σ | N | mock-det σ | N."""
+    bands = [(VIS_IDX, "VIS"), (H_IDX, "NISP-H")]
+
+    sig_norm = mcolors.LogNorm(vmin=0.01, vmax=10)
+    n_norm   = mcolors.LogNorm(vmin=1,    vmax=1e4)
+    sig_cmap = "RdYlGn_r"
+    n_cmap   = "viridis"
+
+    fig, axes = plt.subplots(2, 6, figsize=(26, 8))
+    fig.suptitle(
+        r"Median $\sigma_{\rm mag}$ in (z, log M*) cells — COSMOS-Deep | mock-all | mock-filtered"
+        f" |  filtered: ≥{MIN_DET_BANDS} det bands",
+        fontsize=10)
+
+    for row, (fi, fname) in enumerate(bands):
+        real_z   = real_cd["z"];  real_logM = real_cd["logM"]
+        r_f      = real_cd["flux"][:, fi];  r_fe = real_cd["fluxerr"][:, fi]
+        _, real_sig = real_mag_sigma(r_f, r_fe)
+        ok_r = np.isfinite(real_z) & np.isfinite(real_logM)
+
+        grid_real_sig = cell_median(real_sig, real_z, real_logM)
+        cnt_real      = cell_count(real_z[ok_r], real_logM[ok_r])
+
+        # mock all
+        mock_s_all  = mock_sigma[:, fi]
+        ok_m        = np.isfinite(mock_z) & np.isfinite(mock_logM)
+        grid_mall_s = cell_median(mock_s_all, mock_z, mock_logM)
+        cnt_mall    = cell_count(mock_z[ok_m], mock_logM[ok_m])
+
+        # mock detected
+        mock_s_det  = np.where(det_mask, mock_sigma[:, fi], np.nan)
+        ok_det      = ok_m & det_mask
+        grid_mdet_s = cell_median(mock_s_det, mock_z, mock_logM)
+        cnt_mdet    = cell_count(mock_z[ok_det], mock_logM[ok_det])
+
+        data_cols = [
+            (grid_real_sig, sig_cmap, sig_norm, "median σ"),
+            (cnt_real.astype(float), n_cmap, n_norm, "N"),
+            (grid_mall_s, sig_cmap, sig_norm, "median σ"),
+            (cnt_mall.astype(float), n_cmap, n_norm, "N"),
+            (grid_mdet_s, sig_cmap, sig_norm, "median σ"),
+            (cnt_mdet.astype(float), n_cmap, n_norm, "N"),
+        ]
+        subtitles = [f"{fname} COSMOS-Deep: median σ",
+                     f"{fname} COSMOS-Deep: N",
+                     f"{fname} mock (all): median σ",
+                     f"{fname} mock (all): N",
+                     f"{fname} mock (≥{MIN_DET_BANDS} det): median σ",
+                     f"{fname} mock (≥{MIN_DET_BANDS} det): N"]
+
+        for col, ((g, cm, nm, lbl), stitle) in enumerate(zip(data_cols, subtitles)):
+            ax = axes[row, col]
+            g_disp = g.copy().astype(float)
+            g_disp[g_disp <= 0] = np.nan
+            pcm = ax.pcolormesh(Z_EDGES, M_EDGES, g_disp, cmap=cm, norm=nm)
+            plt.colorbar(pcm, ax=ax, label=lbl)
+            ax.set_xlim(0, 5); ax.set_ylim(5, 12)
+            ax.set_xlabel("z", fontsize=8)
+            ax.set_ylabel(r"$\log M_*$", fontsize=8)
+            ax.set_title(stitle, fontsize=8)
+            ax.tick_params(labelsize=7)
+
+    fig.tight_layout()
+    out = outdir / "sigma_grid.png"
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+    print(f"  Saved: {out.name}")
+
+
+# ── sigma_vs_z ─────────────────────────────────────────────────────────────
+
+def plot_sigma_vs_z(real_cats, mock_sigma, det_mask, mock_z, outdir):
+    """Median sigma_mag vs redshift for VIS and NISP-H (log y-scale)."""
+    bands = [(VIS_IDX, "VIS"), (H_IDX, "NISP-H")]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle(r"Median $\sigma_{\rm mag}$ vs redshift", fontsize=12)
+
+    for ax, (fi, fname) in zip(axes, bands):
+        for key in ["cosmos_deep", "cosmos_web"]:
+            c = real_cats.get(key)
+            if c is None:
+                continue
+            _, sig_r = real_mag_sigma(c["flux"][:, fi], c["fluxerr"][:, fi])
+            ok = np.isfinite(sig_r) & (sig_r > 0) & np.isfinite(c["z"]) & (c["z"] > 0)
+            prof = zprofile(sig_r[ok], c["z"][ok])
+            ls = "-" if key == "cosmos_deep" else "--"
+            ax.plot(ZP_CEN, prof[:, 1], color=c["color"], ls=ls, lw=2, label=c["label"])
+            ax.fill_between(ZP_CEN, np.maximum(prof[:, 0], 1e-4),
+                            np.maximum(prof[:, 2], 1e-4), alpha=0.2, color=c["color"])
+
+        ok_z = np.isfinite(mock_z) & (mock_z > 0)
+
+        # mock all
+        s_all = mock_sigma[:, fi]
+        ok_all = ok_z & np.isfinite(s_all) & (s_all > 0)
+        prof_a = zprofile(s_all[ok_all], mock_z[ok_all])
+        ax.plot(ZP_CEN, prof_a[:, 1], color="#e6693a", ls="--", lw=2, label="mock (all)")
+        ax.fill_between(ZP_CEN, np.maximum(prof_a[:, 0], 1e-4),
+                        np.maximum(prof_a[:, 2], 1e-4), alpha=0.15, color="#e6693a")
+
+        # mock detected
+        s_det = np.where(det_mask, mock_sigma[:, fi], np.nan)
+        ok_det = ok_z & np.isfinite(s_det) & (s_det > 0)
+        prof_d = zprofile(s_det[ok_det], mock_z[ok_det])
+        ax.plot(ZP_CEN, prof_d[:, 1], color="#c0392b", ls="-", lw=2.5,
+                label=f"mock (≥{MIN_DET_BANDS} det bands)")
+        ax.fill_between(ZP_CEN, np.maximum(prof_d[:, 0], 1e-4),
+                        np.maximum(prof_d[:, 2], 1e-4), alpha=0.15, color="#c0392b")
+
+        ax.set_yscale("log")
+        ax.set_xlabel("Redshift z", fontsize=11)
+        ax.set_ylabel(r"$\sigma_{\rm mag}$", fontsize=11)
+        ax.set_title(fname, fontsize=12)
+        ax.set_xlim(0, 5)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, which="both")
+
+    fig.tight_layout()
+    out = outdir / "sigma_vs_z.png"
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"  Saved: {out.name}")
+
+
+# ── sigma_vs_mag ───────────────────────────────────────────────────────────
+
+def plot_sigma_vs_mag(fi, fname, real_cd, noiseless_mag, mock_sigma, mock_z,
+                      mock_logM, mock_logSFR, det_mask, outdir):
+    """4×2 scatter of sigma_mag vs mag, colored by z / logM* / logSFR / logsSFR."""
+    mock_logsSFR = np.where(np.isfinite(mock_logM) & (mock_logM > 0) & np.isfinite(mock_logSFR),
+                            mock_logSFR - mock_logM, np.nan)
+    real_logsSFR = real_cd["logsSFR"]
+
+    rows = [
+        ("Redshift z",    real_cd["z"],      mock_z,       "viridis",  (0, 4.5),   None),
+        (r"$\log M_*$",   real_cd["logM"],   mock_logM,    "plasma",   (7, 11.5),  None),
+        ("log SFR",       real_cd["logSFR"], mock_logSFR,  "YlOrRd",   (-3, 2.5),  None),
+        ("log sSFR",      real_logsSFR,      mock_logsSFR, "RdPu_r",   (-13.5, -8.5), None),
+    ]
+
+    # real data
+    real_f  = real_cd["flux"][:, fi]
+    real_fe = real_cd["fluxerr"][:, fi]
+    real_mag_vals, real_sig_vals = real_mag_sigma(real_f, real_fe)
+    ok_real = np.isfinite(real_mag_vals) & np.isfinite(real_sig_vals) & (real_sig_vals > 0)
+
+    # mock: use all galaxies, noiseless mag + noise model sigma
+    nl_mag   = np.where(noiseless_mag[:, fi] > 0,
+                        flux_ujy_to_mag(np.maximum(noiseless_mag[:, fi], 1e-30)), np.nan)
+    mock_sig = mock_sigma[:, fi]
+    ok_mock  = np.isfinite(nl_mag) & np.isfinite(mock_sig) & (mock_sig > 0)
+
+    # downsample real for speed (max 80k points)
+    rng = np.random.default_rng(42)
+    real_idx = np.where(ok_real)[0]
+    if len(real_idx) > 80000:
+        real_idx = rng.choice(real_idx, 80000, replace=False)
+    mock_idx = np.where(ok_mock)[0]
+
+    n_real = len(real_idx)
+    n_mock = len(mock_idx)
+
+    fig, axes = plt.subplots(4, 2, figsize=(12, 22))
+    fig.suptitle(
+        f"{fname} — $\\sigma_{{\\rm mag}}$ vs magnitude\n"
+        "Left: COSMOS-Deep    Right: mock atlas",
+        fontsize=12)
+
+    dashed_mags = [22, 24, 26, 28]
+
+    for row, (clabel, real_c, mock_c, cmap, vlim, _) in enumerate(rows):
+        for col, (idx, mag_v, sig_v, c_vals, N_label) in enumerate([
+            (real_idx, real_mag_vals, real_sig_vals, real_c, f"COSMOS-Deep · {clabel} (N={n_real:,})"),
+            (mock_idx, nl_mag,        mock_sig,       mock_c, f"mock · {clabel} (N={n_mock:,})"),
+        ]):
+            ax = axes[row, col]
+            c_use = c_vals[idx] if c_vals is not None else None
+            ok_c  = np.isfinite(c_use) if c_use is not None else np.ones(len(idx), dtype=bool)
+            idx2  = idx[ok_c]
+            cv    = c_use[ok_c]
+
+            sc = ax.scatter(mag_v[idx2], sig_v[idx2],
+                            c=cv, cmap=cmap, vmin=vlim[0], vmax=vlim[1],
+                            s=0.5, alpha=0.4, rasterized=True)
+            plt.colorbar(sc, ax=ax, label=clabel)
+
+            for dm in dashed_mags:
+                ax.axvline(dm, color="gray", lw=0.5, ls="--", alpha=0.5)
+
+            ax.set_yscale("log")
+            ax.set_xlim(17, 30)
+            ax.set_ylim(0.008, 12)
+            ax.set_xlabel("AB magnitude", fontsize=9)
+            ax.set_ylabel(r"$\sigma_{\rm mag}$", fontsize=9)
+            ax.set_title(N_label, fontsize=8)
+            ax.tick_params(labelsize=8)
+
+    fig.tight_layout()
+    fname_safe = fname.replace("-", "_")
+    out = outdir / f"sigma_vs_mag_{fname_safe}.png"
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+    print(f"  Saved: {out.name}")
+
+
+# ── ssfr_vs_z ──────────────────────────────────────────────────────────────
+
+def plot_ssfr_vs_z(real_cats, mock_z, mock_logM, mock_logSFR, det_mask, outdir):
+    """Median sSFR vs redshift: real catalogs vs mock all + detected + Schreiber+15."""
+    mock_ssfr = np.where(np.isfinite(mock_logM) & (mock_logM > 0) & np.isfinite(mock_logSFR),
+                         mock_logSFR - mock_logM, np.nan)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    for key in ["cosmos_deep", "cosmos_web"]:
+        c = real_cats.get(key)
+        if c is None:
             continue
-        z    = cat["z"]
-        logM = cat["logM"]
-        logSFR = cat["logSFR"]
-        ok = (np.isfinite(z) & (z > 0) & np.isfinite(logM) & (logM > 5)
-              & np.isfinite(logSFR) & (logSFR > -5))
-        if ok.sum() < 10:
-            continue
-        ssfr = logSFR[ok] - logM[ok]
-        med, p16, p84 = _profile(ssfr, z[ok])
-        ax.plot(z_cen, med, "o-", ms=4, color=CAT_COLORS[key], label=CAT_LABELS[key])
-        ax.fill_between(z_cen, p16, p84, alpha=0.15, color=CAT_COLORS[key])
+        ok = (np.isfinite(c["logsSFR"]) & np.isfinite(c["z"]) & (c["z"] > 0) &
+              (c["logsSFR"] > -15) & (c["logsSFR"] < 0))
+        prof = zprofile(c["logsSFR"][ok], c["z"][ok])
+        ls = "-" if key == "cosmos_deep" else "--"
+        ax.plot(ZP_CEN, prof[:, 1], color=c["color"], ls=ls, lw=2, label=c["label"])
+        ax.fill_between(ZP_CEN, prof[:, 0], prof[:, 2], alpha=0.2, color=c["color"])
 
-    # mock all
-    mstar = mock_theta["mstar"]
-    sfr   = mock_theta["sfr"]
-    z_m   = mock_theta["z"]
-    ok_m  = np.isfinite(mstar) & (mstar > 5) & np.isfinite(sfr) & np.isfinite(z_m) & (z_m > 0)
-    if ok_m.sum() > 10:
-        ssfr_m = sfr[ok_m] - mstar[ok_m]
-        med_m, p16_m, p84_m = _profile(ssfr_m, z_m[ok_m])
-        ax.plot(z_cen, med_m, "k--", ms=4, lw=1.5, label="Mock all")
-        ax.fill_between(z_cen, p16_m, p84_m, alpha=0.10, color="k")
+    ok_m = np.isfinite(mock_z) & (mock_z > 0) & np.isfinite(mock_ssfr) & (mock_ssfr > -15)
+    prof_m = zprofile(mock_ssfr[ok_m], mock_z[ok_m])
+    ax.plot(ZP_CEN, prof_m[:, 1], "k--", lw=2, label="mock (all)")
+    ax.fill_between(ZP_CEN, prof_m[:, 0], prof_m[:, 2], alpha=0.1, color="k")
 
-    # mock detected
     ok_d = ok_m & det_mask
-    if ok_d.sum() > 10:
-        ssfr_d = sfr[ok_d] - mstar[ok_d]
-        med_d, p16_d, p84_d = _profile(ssfr_d, z_m[ok_d])
-        ax.plot(z_cen, med_d, "ks-", ms=4, lw=1.5, label="Mock detected")
-        ax.fill_between(z_cen, p16_d, p84_d, alpha=0.10, color="gray")
+    prof_d = zprofile(mock_ssfr[ok_d], mock_z[ok_d])
+    ax.plot(ZP_CEN, prof_d[:, 1], "rs-", ms=4, lw=2, label=f"mock (≥{MIN_DET_BANDS} det)")
+    ax.fill_between(ZP_CEN, prof_d[:, 0], prof_d[:, 2], alpha=0.1, color="r")
 
-    # Schreiber+15 main sequence reference
     z_ref = np.linspace(0.05, 5.0, 100)
-    ax.plot(z_ref, _ms_ssfr(z_ref), "r--", lw=1.5, label="Schreiber+15 MS")
+    ms_ssfr = np.where(z_ref < 1, 1.0, np.where(z_ref < 2, 2.0, 2.8)) * np.log10(1 + z_ref) - 10.0
+    ax.plot(z_ref, ms_ssfr, "r--", lw=1.5, label="Schreiber+15 MS")
 
     ax.set_xlabel("Redshift", fontsize=11)
-    ax.set_ylabel(r"$\log_{10}$(sSFR / yr$^{-1}$)", fontsize=11)
+    ax.set_ylabel(r"$\log_{10}(\mathrm{sSFR}\ /\ \mathrm{yr}^{-1})$", fontsize=11)
     ax.set_xlim(0, 5)
     ax.set_ylim(-13, -7)
     ax.legend(fontsize=9)
@@ -540,52 +629,43 @@ def plot_ssfr_vs_z(real_cats, mock_theta, det_mask, outdir):
 
 # ── main ──────────────────────────────────────────────────────────────────
 
-args_global = None  # set in main() so plot functions can access args
+MIN_DET_BANDS = 3   # module-level default, overridden in main()
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Atlas noise/magnitude diagnostic")
     p.add_argument("--atlas", type=str,
-                   default="atlas_obs_euclid_north_validate_20000_Nparam_2.dbatlas",
-                   help="Atlas filename in library/ (default: atlas_obs_euclid_north_validate_20000_Nparam_2.dbatlas)")
+                   default="atlas_obs_euclid_north_validate_20000_Nparam_2.dbatlas")
     p.add_argument("--phot-type", type=str, default="templfit",
-                   choices=["templfit", "2fwhm", "3fwhm"],
-                   help="Photometry type for noise model and real catalogs (default: templfit)")
-    p.add_argument("--catalogs", type=str, nargs="+",
-                   default=["cosmos_deep", "cosmos_web", "desi"],
-                   choices=["cosmos_deep", "cosmos_web", "desi"],
-                   help="Real catalogs to overlay (default: all three)")
+                   choices=["templfit", "2fwhm", "3fwhm"])
     p.add_argument("--min-det-bands", type=int, default=3,
-                   help="Min bands with SNR≥3 to count as detected (0=no filter, default: 3)")
-    p.add_argument("--outdir", type=str, default="sbi-logs/diagnose_v1.0",
-                   help="Output directory (default: sbi-logs/diagnose_v1.0)")
+                   help="Min bands with SNR≥3 to count as detected (default: 3)")
+    p.add_argument("--outdir", type=str, default="sbi-logs/diagnose_v1.0")
     return p.parse_args()
 
 
 def main():
-    global args_global
+    global MIN_DET_BANDS
 
     args = parse_args()
-    args_global = args
+    MIN_DET_BANDS = args.min_det_bands
 
     print("=" * 60)
     print("diagnose_sigma_vs_mag")
     print(f"  Atlas        : {args.atlas}")
     print(f"  Phot         : {args.phot_type}")
-    print(f"  Catalogs     : {args.catalogs}")
-    print(f"  min-det-bands: {args.min_det_bands}  (0=no filter)")
+    print(f"  min-det-bands: {args.min_det_bands}")
     print(f"  Outdir       : {args.outdir}")
     print("=" * 60)
-    print()
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # ── load sbipix ──────────────────────────────────────────────────
+    noise_prefix = f"north_{args.phot_type}"
+
+    # ── sbipix noise model ────────────────────────────────────────────
     from sbipix import sbipix
     import hickle
-
-    noise_prefix = f"north_{args.phot_type}"
 
     sx = sbipix()
     sx.configure_filters(
@@ -597,86 +677,75 @@ def main():
         limits_file=f"background_noise_{noise_prefix}.npy",
         lam_eff_file=f"lam_eff_{noise_prefix}.npy",
     )
-    sx.configure_noise_model(
-        sigma_sampler="mag_lognormal",
-        detection_model="hard",
-        observation_space="mag",
-    )
+    sx.configure_noise_model(sigma_sampler="mag_lognormal",
+                             detection_model="hard", observation_space="mag")
     sx.load_obs_features()
-    print(f"Sigma samples loaded: {sx.sigma_samples_obs is not None}")
-    print("Observational features loaded")
+    print(f"Noise model loaded (sigma_samples: {sx.sigma_samples_obs is not None})")
 
-    # ── load atlas ───────────────────────────────────────────────────
+    # ── load atlas ────────────────────────────────────────────────────
     atlas_path = LIB_DIR / args.atlas
     print(f"\nAtlas: {args.atlas}")
     data = hickle.load(str(atlas_path))
-    # keys are top-level for this atlas format
-    key_prefix = "data/" if "data/mstar" in data else ""
-    mstar = np.array(data[key_prefix + "mstar"], dtype=float)
-    sfr   = np.array(data[key_prefix + "sfr"],   dtype=float)
-    zval  = np.array(data[key_prefix + "zval"],  dtype=float)
-    sed   = np.array(data[key_prefix + "sed"],   dtype=float)   # (n_gal, n_filt) in µJy
+    key_pfx = "data/" if "data/mstar" in data else ""
+    mstar = np.array(data[key_pfx + "mstar"], dtype=float)
+    sfr   = np.array(data[key_pfx + "sfr"],   dtype=float)
+    zval  = np.array(data[key_pfx + "zval"],  dtype=float)
+    sed   = np.array(data[key_pfx + "sed"],   dtype=float)   # (n, 10) µJy
 
-    n_total = len(mstar)
-    print(f"  Loaded {n_total} galaxies from hickle")
-
-    # physical mask: logM > 5
     phys = mstar > 5
-    mstar = mstar[phys]
-    sfr   = sfr[phys]
-    zval  = zval[phys]
-    sed   = sed[phys]
-    print(f"  Physical mask: {phys.sum()} / {n_total} pass (logM>5)")
-    print(f"  logM=[{mstar.min():.1f},{mstar.max():.1f}]  z=[{zval.min():.2f},{zval.max():.2f}]")
+    mstar = mstar[phys]; sfr = sfr[phys]; zval = zval[phys]; sed = sed[phys]
+    print(f"  {phys.sum()} / {len(phys)} galaxies pass logM>5 filter")
 
-    # ── load real catalogs ───────────────────────────────────────────
-    print("\nLoading obs catalogs...")
-    real_cats = {}
-    for key in args.catalogs:
-        cat = load_catalog(key, args.phot_type)
-        if cat is not None:
-            real_cats[key] = cat
+    # noiseless magnitudes
+    noiseless_mag = np.where(sed > 0, flux_ujy_to_mag(np.maximum(sed, 1e-30)), np.nan)
 
-    # ── inject noise ─────────────────────────────────────────────────
-    sigma_mag, flux_noisy, det_mask = inject_noise_and_detect(sx, sed, zval, args.min_det_bands)
+    # inject noise
+    print("  Injecting noise...")
+    sx.obs           = flux_ujy_to_mag(np.maximum(sed, 1e-30))
+    sx.obs           = np.where(sed > 0, sx.obs, 99.0)
+    sx.n_simulation  = len(mstar)
+    sx.add_noise_nan_limit_all()
 
-    # summary
+    noisy_mag  = sx.mag[:, :, 0]   # (n, n_filt), 99 = non-detection
+    sigma_mag  = sx.mag[:, :, 1]   # (n, n_filt)
+
+    detected   = (noisy_mag < 98.0) & np.isfinite(noisy_mag)
+    n_det_band = np.sum(detected, axis=1)
+    det_mask   = n_det_band >= args.min_det_bands
+
     n_pass = det_mask.sum()
-    print(f"\n  Detection filter: SNR≥3.0 in ≥{args.min_det_bands} bands")
-    print(f"  Pass: {n_pass}/{len(det_mask)} ({100*n_pass/len(det_mask):.1f}%)")
-    z_edges = [0, 1, 2, 3, 4, 5]
-    for lo, hi in zip(z_edges[:-1], z_edges[1:]):
-        in_bin = (zval >= lo) & (zval < hi)
-        n_bin  = in_bin.sum()
-        n_det  = (det_mask & in_bin).sum()
-        frac   = 100 * n_det / n_bin if n_bin > 0 else 0
-        print(f"    z=[{lo},{hi}): {n_det}/{n_bin} ({frac:.1f}%)")
+    print(f"  Detected ≥{args.min_det_bands} bands: {n_pass}/{len(mstar)} "
+          f"({100*n_pass/len(mstar):.1f}%)")
+    for lo, hi in [(0,1),(1,2),(2,3),(3,4),(4,5)]:
+        m = (zval >= lo) & (zval < hi)
+        nd = (det_mask & m).sum()
+        print(f"    z=[{lo},{hi}): {nd}/{m.sum()} ({100*nd/max(m.sum(),1):.1f}%)")
 
-    # per-filter sigma stats (after detection)
-    print(f"\n  σ-debug (after det-filter, {n_pass} galaxies):")
-    for j, fname in enumerate(FILTER_SHORT):
-        sm = sigma_mag[det_mask, j]
-        ok = np.isfinite(sm) & (sm > 0)
-        p50 = np.nanpercentile(sm[ok], 50) if ok.sum() > 0 else np.nan
-        print(f"    [{j}] {fname:<12} p50_sigma={p50:.3f}  in_domain={ok.sum()}/{n_pass}")
+    # ── load real catalogs ────────────────────────────────────────────
+    print("\nLoading real catalogs...")
+    real_cats = {}
+    for key in ["cosmos_deep", "cosmos_web"]:
+        c = load_catalog(key, args.phot_type)
+        if c is not None:
+            real_cats[key] = c
 
-    # ── plots ────────────────────────────────────────────────────────
+    real_cd = real_cats.get("cosmos_deep")
+    if real_cd is None:
+        raise RuntimeError("COSMOS-Deep catalog is required but could not be loaded.")
+
+    # ── plots ─────────────────────────────────────────────────────────
     print("\nGenerating plots...")
 
-    # VIS and NISP-H individual panels
-    vis_idx = FILTER_SHORT.index("VIS")
-    h_idx   = FILTER_SHORT.index("NISP-H")
-    plot_sigma_vs_mag_single(vis_idx, "VIS", sigma_mag, flux_noisy, real_cats, outdir)
-    plot_sigma_vs_mag_single(h_idx,   "NISP-H", sigma_mag, flux_noisy, real_cats, outdir)
-
-    plot_sigma_vs_z(sigma_mag, zval, det_mask, real_cats, outdir)
-    plot_coverage(zval, det_mask, real_cats, outdir)
-    plot_sigma_grid(sigma_mag, flux_noisy, det_mask, real_cats, outdir)
-    plot_mag_vs_z(flux_noisy, zval, det_mask, real_cats, outdir)
-    plot_mag_grid(flux_noisy, det_mask, real_cats, outdir)
-
-    mock_theta = {"mstar": mstar, "sfr": sfr, "z": zval}
-    plot_ssfr_vs_z(real_cats, mock_theta, det_mask, outdir)
+    plot_coverage(real_cats, zval, mstar, sfr, outdir)
+    plot_mag_grid(real_cd, sed, noisy_mag, det_mask, zval, mstar, outdir)
+    plot_mag_vs_z(real_cats, sed, noisy_mag, det_mask, zval, outdir)
+    plot_sigma_grid(real_cd, sigma_mag, det_mask, zval, mstar, outdir)
+    plot_sigma_vs_z(real_cats, sigma_mag, det_mask, zval, outdir)
+    plot_sigma_vs_mag(VIS_IDX, "VIS", real_cd, sed, sigma_mag,
+                      zval, mstar, sfr, det_mask, outdir)
+    plot_sigma_vs_mag(H_IDX, "NISP-H", real_cd, sed, sigma_mag,
+                      zval, mstar, sfr, det_mask, outdir)
+    plot_ssfr_vs_z(real_cats, zval, mstar, sfr, det_mask, outdir)
 
     print(f"\nDone. All plots → {args.outdir}/")
 
