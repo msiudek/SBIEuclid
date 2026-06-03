@@ -12,8 +12,8 @@ python examples/inference_cosmosweb.py \
     --outdir sbi-logs/inference_cosmosweb 2>&1 | tee sbi-logs/inference_cosmosweb.log
 
 Selection criteria applied before inference:
-  - valid zfinal photometric redshift
-  - valid COSMOS-Web mass_med reference mass
+  - valid z_lephare photometric redshift
+  - valid COSMOS-Web logM_lephare reference mass
   - at least --n-bands-min filters with SNR >= --snr-min
 """
 
@@ -31,8 +31,7 @@ ROOT       = Path(__file__).resolve().parents[1]
 OBS_DIR    = ROOT / "obs" / "obs_properties"
 LIB_DIR    = ROOT / "library"
 CATALOG    = ROOT / "obs" / "obs_properties" / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"
-MODEL_NAME   = "model_euclid_v1.5_mass_sfr_zcond.pkl"
-ATLAS_NAME   = "atlas_obs_euclid_north_validate_100000_Nparam_2.dbatlas"
+MODEL_NAME = "model_euclid_v1.0.pkl"
 
 # Filter order from filters_to_use.dat (must match training order)
 FILTER_STEMS = [
@@ -113,17 +112,18 @@ def parse_args():
                    help="Output directory for results and plots")
     p.add_argument("--model-name",  type=str,   default=MODEL_NAME,
                    help=f"Model filename in library/ (default: {MODEL_NAME})")
-    p.add_argument("--sample-with", type=str, default="mcmc", choices=["rejection", "mcmc"],
-                   help="Posterior sampling backend (default: mcmc)")
+    p.add_argument("--sample-with", type=str, default="rejection", choices=["rejection", "mcmc"],
+                   help="Posterior sampling backend (default: rejection)")
     p.add_argument("--phot-type",   type=str, default="templfit",
                    choices=["templfit", "2fwhm", "3fwhm"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
                          "'2fwhm', or '3fwhm' aperture. Default: templfit"))
-    p.add_argument("--observation-space", type=str, default="mag",
+    p.add_argument("--observation-space", type=str, default="flux",
                    choices=["mag", "flux"],
                    help=(
-                       "Feature space expected by the model: 'mag' for legacy mag+sigma, "
-                       "'flux' for flux+sigma_flux (keeps negative noisy realizations)."
+                       "Feature space expected by the model: 'flux' for flux+sigma_flux "
+                       "(keeps negative noisy realizations), 'mag' for legacy mag+sigma. "
+                       "Default: flux"
                    ))
     p.add_argument("--device",      type=str,   default="cpu",
                    help="Inference device: cpu or cuda (default: cpu)")
@@ -291,16 +291,19 @@ def main():
             "(re-run the catalog matching script to add them)."
         ) from exc
 
-    # Reference values
-    z_ref    = np.array(cat["zfinal"],   dtype=float)
-    mass_ref = np.array(cat["mass_med"], dtype=float)   # log10(M/Msun)
-    mass_lo  = np.array(cat["mass_l68"], dtype=float)
-    mass_hi  = np.array(cat["mass_u68"], dtype=float)
+    # Reference values (matched_euclid_cosmosweb.fits: LePhare + z_lephare)
+    z_ref    = np.array(cat["z_lephare"],        dtype=float)
+    mass_ref = np.array(cat["logM_lephare"],     dtype=float)   # log10(M/Msun)
+    mass_lo  = np.array(cat["logM_l68_lephare"], dtype=float)
+    mass_hi  = np.array(cat["logM_u68_lephare"], dtype=float)
 
-    # Optional SFR reference columns (names vary across COSMOS-Web exports)
-    sfr_ref_col = _find_first_existing_column(cat, ["sfr_med", "logsfr_med", "sfr", "log_sfr"])
-    sfr_lo_col = _find_first_existing_column(cat, ["sfr_l68", "logsfr_l68", "sfr_lo", "log_sfr_lo"])
-    sfr_hi_col = _find_first_existing_column(cat, ["sfr_u68", "logsfr_u68", "sfr_hi", "log_sfr_hi"])
+    # SFR reference columns (logSFR_lephare is log10 M☉/yr)
+    sfr_ref_col = _find_first_existing_column(
+        cat, ["logSFR_lephare", "sfr_med", "logsfr_med", "sfr", "log_sfr"])
+    sfr_lo_col  = _find_first_existing_column(
+        cat, ["logSFR_l68_lephare", "sfr_l68", "logsfr_l68", "sfr_lo", "log_sfr_lo"])
+    sfr_hi_col  = _find_first_existing_column(
+        cat, ["logSFR_u68_lephare", "sfr_u68", "logsfr_u68", "sfr_hi", "log_sfr_hi"])
 
     if sfr_ref_col is not None:
         sfr_ref = np.array(cat[sfr_ref_col], dtype=float)
@@ -445,12 +448,22 @@ def main():
         except Exception as exc:
             return False, str(exc)
 
+    # Helper: load pickle file remapping any CUDA tensors to target device.
+    # torch.load with map_location doesn't reach tensors nested inside pickle
+    # objects, so we temporarily patch torch.load itself.
+    import functools as _functools
+    def _safe_load(path):
+        _orig = torch.load
+        try:
+            torch.load = _functools.partial(_orig, map_location=args.device, weights_only=False)
+            with open(path, "rb") as _f:
+                return pickle.load(_f)
+        finally:
+            torch.load = _orig
+
     # Prefer rebuilding posterior from SNPE object when available.
-    # This is more robust than relying on a pickled posterior object and
-    # ensures context dimensionality (photometry vs photometry+z) is consistent.
     try:
-        with open(anpe_file, "rb") as f:
-            anpe = pickle.load(f)
+        anpe = _safe_load(anpe_file)
         try:
             qphi = anpe.build_posterior(sample_with=args.sample_with)
             print(f"Using posterior sampler backend: {args.sample_with}")
@@ -473,8 +486,7 @@ def main():
         probe_errors.append(f"anpe load/rebuild failed ({exc})")
 
     if qphi is None:
-        with open(model_file, "rb") as f:
-            qphi_model = pickle.load(f)
+        qphi_model = _safe_load(model_file)
 
         ok, err = _supports_obs_plus_z(qphi_model)
         if ok:
@@ -580,22 +592,22 @@ def main():
     delta = logM_med[valid] - mass_sel[valid]
     r, _ = pearsonr(mass_sel[valid], logM_med[valid])
     print(f"\nMass comparison (N={valid.sum()}):")
-    print(f"  Pearson r            = {r:.3f}")
-    print(f"  Median Δ(SBI-CWeb)   = {np.median(delta):.3f} dex")
-    print(f"  NMAD(Δ)              = {1.4826 * np.median(np.abs(delta - np.median(delta))):.3f} dex")
-    print(f"  Std(Δ)               = {np.std(delta):.3f} dex")
-    print(f"  SBI logM* range      : [{logM_med[valid].min():.2f}, {logM_med[valid].max():.2f}]")
-    print(f"  COSMOS-Web logM range: [{mass_sel[valid].min():.2f}, {mass_sel[valid].max():.2f}]")
+    print(f"  Pearson r              = {r:.3f}")
+    print(f"  Median Δ(SBI-CWeb)     = {np.median(delta):.3f} dex")
+    print(f"  NMAD(Δ)                = {1.4826 * np.median(np.abs(delta - np.median(delta))):.3f} dex")
+    print(f"  Std(Δ)                 = {np.std(delta):.3f} dex")
+    print(f"  SBI logM* range        : [{logM_med[valid].min():.2f}, {logM_med[valid].max():.2f}]")
+    print(f"  CWeb logM (LePhare)    : [{mass_sel[valid].min():.2f}, {mass_sel[valid].max():.2f}]")
 
     sfr_valid = np.isfinite(logSFR_med) & np.isfinite(sfr_sel)
     if np.any(sfr_valid):
         sfr_delta = logSFR_med[sfr_valid] - sfr_sel[sfr_valid]
         print(f"\nSFR comparison (N={sfr_valid.sum()}):")
-        print(f"  Median Δ(SBI-CWeb)   = {np.median(sfr_delta):.3f} dex")
-        print(f"  NMAD(Δ)              = {1.4826 * np.median(np.abs(sfr_delta - np.median(sfr_delta))):.3f} dex")
-        print(f"  Std(Δ)               = {np.std(sfr_delta):.3f} dex")
-        print(f"  SBI logSFR range     : [{logSFR_med[sfr_valid].min():.2f}, {logSFR_med[sfr_valid].max():.2f}]")
-        print(f"  COSMOS-Web logSFR range: [{sfr_sel[sfr_valid].min():.2f}, {sfr_sel[sfr_valid].max():.2f}]")
+        print(f"  Median Δ(SBI-CWeb)     = {np.median(sfr_delta):.3f} dex")
+        print(f"  NMAD(Δ)                = {1.4826 * np.median(np.abs(sfr_delta - np.median(sfr_delta))):.3f} dex")
+        print(f"  Std(Δ)                 = {np.std(sfr_delta):.3f} dex")
+        print(f"  SBI logSFR range       : [{logSFR_med[sfr_valid].min():.2f}, {logSFR_med[sfr_valid].max():.2f}]")
+        print(f"  CWeb logSFR (LePhare)  : [{sfr_sel[sfr_valid].min():.2f}, {sfr_sel[sfr_valid].max():.2f}]")
 
     # ------------------------------------------------------------------
     # 8. Plots (shared validation plotting utilities)

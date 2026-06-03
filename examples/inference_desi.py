@@ -416,10 +416,19 @@ def main():
         except Exception as exc:
             return False, str(exc)
 
+    import functools as _functools
+    def _safe_load(path):
+        _orig = torch.load
+        try:
+            torch.load = _functools.partial(_orig, map_location=args.device, weights_only=False)
+            with open(path, "rb") as _f:
+                return pickle.load(_f)
+        finally:
+            torch.load = _orig
+
     # Prefer rebuilding posterior from SNPE object when available.
     try:
-        with open(anpe_file, "rb") as f:
-            anpe = pickle.load(f)
+        anpe = _safe_load(anpe_file)
         try:
             qphi = anpe.build_posterior(sample_with=args.sample_with)
             print(f"Using posterior sampler backend: {args.sample_with}")
@@ -442,8 +451,7 @@ def main():
         probe_errors.append(f"anpe load/rebuild failed ({exc})")
 
     if qphi is None:
-        with open(model_file, "rb") as f:
-            qphi_model = pickle.load(f)
+        qphi_model = _safe_load(model_file)
 
         ok, err = _supports_obs_plus_z(qphi_model)
         if ok:
