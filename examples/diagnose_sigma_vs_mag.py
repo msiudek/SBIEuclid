@@ -641,6 +641,16 @@ def parse_args():
     p.add_argument("--min-det-bands", type=int, default=3,
                    help="Min bands with SNR≥3 to count as detected (default: 3)")
     p.add_argument("--outdir", type=str, default="sbi-logs/diagnose_v1.0")
+    p.add_argument(
+        "--z-mass-floor",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Apply z-dependent logM* floor (matches train_euclid.py --z-mass-floor). "
+            "z<1→logM≥5, z<2→logM≥7, z<3→logM≥8, z<4→logM≥8.5, z≥4→logM≥9. "
+            "Default: False (show full atlas). Use True to match training subset."
+        ),
+    )
     return p.parse_args()
 
 
@@ -655,6 +665,7 @@ def main():
     print(f"  Atlas        : {args.atlas}")
     print(f"  Phot         : {args.phot_type}")
     print(f"  min-det-bands: {args.min_det_bands}")
+    print(f"  z-mass-floor : {args.z_mass_floor}")
     print(f"  Outdir       : {args.outdir}")
     print("=" * 60)
 
@@ -695,6 +706,20 @@ def main():
     phys = mstar > 5
     mstar = mstar[phys]; sfr = sfr[phys]; zval = zval[phys]; sed = sed[phys]
     print(f"  {phys.sum()} / {len(phys)} galaxies pass logM>5 filter")
+
+    if args.z_mass_floor:
+        _floor = np.where(zval < 1.0, 5.0,
+                 np.where(zval < 2.0, 7.0,
+                 np.where(zval < 3.0, 8.0,
+                 np.where(zval < 4.0, 8.5, 9.0))))
+        _keep = mstar >= _floor
+        n_before = len(mstar)
+        mstar = mstar[_keep]; sfr = sfr[_keep]
+        zval  = zval[_keep];  sed = sed[_keep]
+        print(f"  Z-floor: kept {len(mstar)} / {n_before} ({100*len(mstar)/n_before:.1f}%)")
+        for (zlo, zhi), mf in zip([(0,1),(1,2),(2,3),(3,4),(4,5)],[5.0,7.0,8.0,8.5,9.0]):
+            b = (zval >= zlo) & (zval < zhi)
+            print(f"    z=[{zlo},{zhi}): {b.sum()} galaxies  (logM≥{mf})")
 
     # noiseless magnitudes
     noiseless_mag = np.where(sed > 0, flux_ujy_to_mag(np.maximum(sed, 1e-30)), np.nan)
