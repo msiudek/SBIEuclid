@@ -73,6 +73,17 @@ def build_parser():
         help="Atlas filename in library/ to use for training (default: v2 100k atlas)",
     )
     p.add_argument(
+        "--test-sampler",
+        type=str,
+        default="rejection",
+        choices=["rejection", "mcmc"],
+        help=(
+            "Posterior sampler used for post-training test_performance plot. "
+            "Use 'mcmc' when --sed-calibrate produces concentrated posteriors "
+            "that rejection sampling cannot find (default: rejection)."
+        ),
+    )
+    p.add_argument(
         "--sed-calibrate",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -593,6 +604,7 @@ posterior = sx.test_performance(
     n_samples=N_POSTERIOR,
     return_posterior=True,
     device=_DEVICE,
+    sample_with=args.test_sampler,
 )
 
 print("Performance test complete!")
