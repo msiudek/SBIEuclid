@@ -126,7 +126,18 @@ def build_parser():
 # CONFIG
 # --------------------------------------------------
 args = build_parser().parse_args()
-N_SIM    = args.n_sim
+
+# Extract N_sim from the atlas filename if it contains the _<N>_Nparam_<k> pattern.
+# This prevents a mismatch when the user passes e.g. atlas_v2_50000_Nparam_2.dbatlas
+# but the --n-sim default (100000) is different.
+_n_in_name = re.search(r'_(\d+)_Nparam_\d+(?:\.dbatlas)?$', str(args.atlas_name))
+if _n_in_name is not None:
+    N_SIM = int(_n_in_name.group(1))
+    if N_SIM != args.n_sim:
+        print(f"N_SIM={N_SIM} inferred from atlas filename (--n-sim={args.n_sim} ignored).")
+else:
+    N_SIM = args.n_sim
+
 N_TEST   = 250
 N_POSTERIOR = 200
 
