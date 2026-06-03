@@ -649,6 +649,70 @@ def plot_mag_grid(primary_cat, mock_params, obs_mag_true, mock_mag, det_mask, mi
     print(f"  Saved: {out.name}")
 
 
+def plot_ssfr_vs_z(all_cats, mock_params, det_mask, min_det, outdir):
+    """sSFR vs redshift: real catalogs vs atlas mock (all | detected subset).
+
+    Shows median ± p16/p84 bands. Helps diagnose whether atlas has the
+    right star-forming population at each redshift.
+    """
+    z_bins = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
+    z_cen  = 0.5 * (z_bins[:-1] + z_bins[1:])
+
+    def _ssfr_profile(ssfr, z):
+        med = np.full(len(z_cen), np.nan)
+        p16 = np.full(len(z_cen), np.nan)
+        p84 = np.full(len(z_cen), np.nan)
+        for i, (zlo, zhi) in enumerate(zip(z_bins[:-1], z_bins[1:])):
+            m = np.isfinite(ssfr) & np.isfinite(z) & (z >= zlo) & (z < zhi) & (ssfr > -15) & (ssfr < 0)
+            if m.sum() >= 5:
+                med[i], p16[i], p84[i] = np.percentile(ssfr[m], [50, 16, 84])
+        return med, p16, p84
+
+    fig, ax = plt.subplots(1, 1, figsize=(9, 5))
+
+    for cat in all_cats:
+        ssfr = cat.get("sSFR", cat["logSFR"] - cat["logM"])
+        style = CAT_STYLES.get(cat["_key"], dict(color="gray", ls="-", lw=1.5))
+        med, p16, p84 = _ssfr_profile(ssfr, cat["z"])
+        ax.fill_between(z_cen, p16, p84, alpha=0.12, color=style["color"])
+        ax.plot(z_cen, med, label=cat["label"], **style)
+
+    # mock atlas — all galaxies
+    mock_ssfr = mock_params["logSFR"] - mock_params["logM"]
+    med_m, p16_m, p84_m = _ssfr_profile(mock_ssfr, mock_params["z"])
+    ax.fill_between(z_cen, p16_m, p84_m, alpha=0.10, color="tomato")
+    ax.plot(z_cen, med_m, color="tomato", lw=1.5, ls="--", label="mock atlas (all)")
+
+    # mock atlas — detected subset
+    if det_mask is not None and min_det > 0:
+        med_f, p16_f, p84_f = _ssfr_profile(mock_ssfr[det_mask], mock_params["z"][det_mask])
+        ax.fill_between(z_cen, p16_f, p84_f, alpha=0.15, color="crimson")
+        ax.plot(z_cen, med_f, color="crimson", lw=2.5, ls="-",
+                label=f"mock atlas (≥{min_det} det bands)")
+
+    # main-sequence reference from the SBI simulator
+    z_ref = np.linspace(0, 5, 200)
+    def _ms_ssfr(z):
+        coeff = np.where(z < 1, 1.0, np.where(z < 2, 2.0, 2.8))
+        return -10.0 + coeff * np.log10(1 + z)
+    ms = _ms_ssfr(z_ref)
+    ax.plot(z_ref, ms, color="black", lw=1.2, ls=":", alpha=0.6, label="Schreiber+15 MS (logM=9)")
+    ax.fill_between(z_ref, ms - 0.3, ms + 0.3, color="black", alpha=0.06)
+
+    ax.set_xlabel("Redshift z", fontsize=12)
+    ax.set_ylabel(r"$\log(\mathrm{sSFR}\;[\mathrm{yr}^{-1}])$", fontsize=12)
+    ax.set_title("sSFR vs redshift — real catalogs (median ± p16/p84) vs mock atlas", fontsize=11)
+    ax.set_ylim(-13, -5)
+    ax.set_xlim(0, 5)
+    ax.axhline(-9, color="gray", lw=0.8, ls="--", alpha=0.4)
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    out = outdir / "ssfr_vs_z.png"
+    fig.savefig(out, dpi=150); plt.close(fig)
+    print(f"  Saved: {out.name}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -709,6 +773,7 @@ def main():
                   det_mask, args.min_det_bands, outdir)
     plot_mag_grid(primary_cat, theta_dict, obs_mag_true, mock_mag,
                   det_mask, args.min_det_bands, outdir)
+    plot_ssfr_vs_z(all_cats, theta_dict, det_mask, args.min_det_bands, outdir)
 
     print(f"\nDone. All plots → {outdir}/")
 
