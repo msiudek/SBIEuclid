@@ -92,7 +92,7 @@ SIMULATION_CONFIG = {
     "mass_max": 11.5,
     "sfr_prior_type": "sSFRlognormal",
     "ssfr_min": -12.5,
-    "ssfr_max": -8.5,
+    "ssfr_max": -7.0,   # v2: was -8.5, raised to avoid clipping star-forming galaxies at z>2
     "z_prior": "flat",
     "z_min": 0.0,
     "z_max": 5.0,
@@ -676,7 +676,7 @@ def build_validation_model(args, obs_dir, library_dir):
     )
     model.atlas_path = str(library_dir) + "/"
     model.model_path = str(library_dir) + "/"
-    model.atlas_name = "atlas_obs_euclid_north_validate"
+    model.atlas_name = args.atlas_name
     model.n_simulation = args.n_sim
     model.parametric = True
     model.both_masses = True
@@ -902,6 +902,8 @@ def build_parser():
                    help="Photometry type to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
     p.add_argument("--n-sim", type=int, default=10000,
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
+    p.add_argument("--atlas-name", type=str, default="atlas_obs_euclid_north_validate",
+                   help="Atlas stem name for dense_basis (default: atlas_obs_euclid_north_validate)")
     p.add_argument("--outdir", default="sbi-logs/validate",
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", "--skip-sim", action="store_true",

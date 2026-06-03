@@ -69,8 +69,18 @@ def build_parser():
     p.add_argument(
         "--atlas-name",
         type=str,
-        default="atlas_obs_euclid_north_validate_100000_Nparam_2.dbatlas",
-        help="Atlas filename in library/ to use for training (default: 100k north validate atlas)",
+        default="atlas_euclid_north_v2_100000_Nparam_2.dbatlas",
+        help="Atlas filename in library/ to use for training (default: v2 100k atlas)",
+    )
+    p.add_argument(
+        "--z-mass-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply z-dependent logM* floor before noise injection (default: True). "
+            "Removes undetectable low-mass high-z galaxies from the training prior: "
+            "z<1→logM>5, z<2→logM>7, z<3→logM>8, z<4→logM>8.5, z≥4→logM>9."
+        ),
     )
     p.add_argument(
         "--n-sim",
@@ -103,10 +113,10 @@ def build_parser():
     p.add_argument(
         "--observation-space",
         choices=["mag", "flux"],
-        default="mag",
+        default="flux",
         help=(
-            "Feature space passed to SBI: 'mag' keeps legacy magnitude+sigma features; "
-            "'flux' uses noisy flux+sigma_flux and keeps negative noisy realizations."
+            "Feature space passed to SBI: 'flux' uses noisy flux+sigma_flux (default, v2+); "
+            "'mag' uses legacy magnitude+sigma features."
         ),
     )
     return p
@@ -306,13 +316,13 @@ if args.model_name is not None:
     sx.model_name = args.model_name
 else:
     if args.params == "mass_sfr" and args.z_mode == "condition":
-        sx.model_name = "model_euclid_v1.5_mass_sfr_zcond.pkl"
+        sx.model_name = "model_euclid_v2.0_mass_sfr_zcond.pkl"
     elif args.params == "mass_sfr" and args.z_mode == "infer":
-        sx.model_name = "model_euclid_v1.5_mass_sfr_zinfer.pkl"
+        sx.model_name = "model_euclid_v2.0_mass_sfr_zinfer.pkl"
     elif args.params == "all" and args.z_mode == "condition":
-        sx.model_name = "model_euclid_v1.5_all_zcond.pkl"
+        sx.model_name = "model_euclid_v2.0_all_zcond.pkl"
     else:
-        sx.model_name = "model_euclid_v1.5_all_zinfer.pkl"
+        sx.model_name = "model_euclid_v2.0_all_zinfer.pkl"
 sx.n_simulation = N_SIM
 
 sx.parametric = True
@@ -344,6 +354,34 @@ print(f"Noise SNR detection threshold: {sx.snr_threshold}")
 print("[1/5] Loading atlas...")
 sx.load_simulation()
 
+# --------------------------------------------------
+# Z-DEPENDENT MASS FLOOR  (v2 prior)
+# --------------------------------------------------
+# theta column order: 0=logM*, 1=logM*_formed, 2=logSFR, 3=tau,
+#                    4=t_i, 5=[M/H], 6=Av, 7=z
+if args.z_mass_floor:
+    _z   = sx.theta[:, 7]
+    _m   = sx.theta[:, 0]
+    _floor = np.where(_z < 1.0, 5.0,
+             np.where(_z < 2.0, 7.0,
+             np.where(_z < 3.0, 8.0,
+             np.where(_z < 4.0, 8.5, 9.0))))
+    _keep = _m >= _floor
+    _n_before = len(sx.theta)
+    sx.theta = sx.theta[_keep]
+    sx.obs   = sx.obs[_keep]
+    sx.n_simulation = int(_keep.sum())
+    print(
+        f"    Z-floor prior: kept {sx.n_simulation} / {_n_before} galaxies "
+        f"({100*sx.n_simulation/_n_before:.1f}%)"
+    )
+    _z_bins = [(0,1),(1,2),(2,3),(3,4),(4,5)]
+    _floors  = [5.0, 7.0, 8.0, 8.5, 9.0]
+    for (zlo, zhi), mf in zip(_z_bins, _floors):
+        _bin = (_z[_keep] >= zlo) & (_z[_keep] < zhi)
+        print(f"      z=[{zlo},{zhi}): {_bin.sum()} galaxies  (logM≥{mf})")
+else:
+    print("    Z-floor prior: disabled (--no-z-mass-floor)")
 
 # --------------------------------------------------
 # ADD REALISM
