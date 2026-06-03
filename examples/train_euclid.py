@@ -73,6 +73,18 @@ def build_parser():
         help="Atlas filename in library/ to use for training (default: v2 100k atlas)",
     )
     p.add_argument(
+        "--sed-calibrate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Apply z-dependent SED brightness correction before noise injection. "
+            "Shifts noiseless mock magnitudes to match real COSMOS-Deep median at "
+            "each z bin (offsets from mag_grid diagnostic): "
+            "z<1→−0.9 mag, z=[1,2)→+1.7, z=[2,3)→+2.4, z≥3→+2.4. "
+            "Corrects M/L ratio mismatch without collapsing the training set."
+        ),
+    )
+    p.add_argument(
         "--z-mass-floor",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -393,6 +405,28 @@ if args.z_mass_floor:
         print(f"      z=[{zlo},{zhi}): {_bin.sum()} galaxies  (logM≥{mf})")
 else:
     print("    Z-floor prior: disabled (--no-z-mass-floor)")
+
+# --------------------------------------------------
+# Z-DEPENDENT SED BRIGHTNESS CALIBRATION  (v2.4+)
+# --------------------------------------------------
+# sx.obs holds noiseless AB magnitudes (n_gal, n_filt).
+# Δmag = median(mock) − median(real COSMOS-Deep) measured from mag_grid diagnostic
+# at logM=8-11, templfit, VIS band:  z<1→−0.9  z=[1,2)→+1.7  z=[2,3)→+2.4  z≥3→+2.4
+# Subtracting Δmag from all mock magnitudes shifts brightness to match real data.
+# Applied before noise injection so σ(mag) is also correct after calibration.
+if args.sed_calibrate:
+    _z_cal = sx.theta[:, 7]
+    _delta = np.where(_z_cal < 1.0, -0.9,
+             np.where(_z_cal < 2.0,  1.7,
+             np.where(_z_cal < 3.0,  2.4, 2.4)))
+    sx.obs = sx.obs - _delta[:, None]   # subtract Δmag from all filters
+    _bins = [(0,1,-0.9),(1,2,1.7),(2,3,2.4),(3,5,2.4)]
+    print("    SED calibration applied (Δmag subtracted from noiseless magnitudes):")
+    for zlo, zhi, dm in _bins:
+        n = ((_z_cal >= zlo) & (_z_cal < zhi)).sum()
+        print(f"      z=[{zlo},{zhi}): Δmag={dm:+.1f}  ({n} galaxies)")
+else:
+    print("    SED calibration: disabled (--sed-calibrate to enable)")
 
 # --------------------------------------------------
 # ADD REALISM
