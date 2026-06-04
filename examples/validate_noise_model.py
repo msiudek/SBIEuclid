@@ -897,6 +897,8 @@ def build_parser():
     p = argparse.ArgumentParser(
         description="Pre-training validation: compare mock noise model to real COSMOS data"
     )
+    p.add_argument("--filter-list", type=str, default="filters_to_use.dat",
+                   help="Filter list file (default: filters_to_use.dat for Euclid; use filters_to_use_jwst.dat for JWST)")
     p.add_argument("--phot-type", default="3fwhm",
                    choices=["2fwhm", "3fwhm", "templfit"],
                    help="Photometry type to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
@@ -923,7 +925,15 @@ def build_parser():
 
 
 def main():
+    global _FILTER_META, FILTER_SHORT, FILTER_COL_STEMS
+
     args = build_parser().parse_args()
+
+    # Reload filters from the specified filter list (default: filters_to_use.dat)
+    _FILTER_META = load_filter_metadata(args.filter_list, filt_dir=str(_OBS_DIR))
+    FILTER_SHORT     = [m["short"]    for m in _FILTER_META]
+    FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
+    print(f"Loaded {len(_FILTER_META)} filters from {args.filter_list}: {', '.join(FILTER_SHORT)}")
 
     if args.n_sim < 10000:
         print(f"NOTE: n_sim={args.n_sim} is fine for a local smoke test, but ~10000+ is recommended for validation.")

@@ -99,6 +99,15 @@ def build_parser():
         ),
     )
     p.add_argument(
+        "--filter-list",
+        type=str,
+        default="filters_to_use.dat",
+        help=(
+            "Filter list file (default: filters_to_use.dat for Euclid; "
+            "use filters_to_use_jwst.dat for JWST NIRCam photometry)"
+        ),
+    )
+    p.add_argument(
         "--sigma-sampler",
         choices=["empirical", "truncnorm", "mag_lognormal"],
         default="mag_lognormal",
@@ -195,9 +204,10 @@ MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
 PATCH_ID = 65879
 
-_FILTER_META = load_filter_metadata("filters_to_use.dat", filt_dir=str(OBS_DIR))
+_FILTER_META = load_filter_metadata(args.filter_list, filt_dir=str(OBS_DIR))
 FILTER_SHORT = [m["short"] for m in _FILTER_META]
 FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
+print(f"Loaded {len(_FILTER_META)} filters from {args.filter_list}: {', '.join(FILTER_SHORT)}")
 
 
 def load_real_mag_for_mock_match(phot_type):
@@ -306,7 +316,7 @@ def draw_resample_indices(weights, n_out, seed=0):
 sx = sbipix()
 
 sx.configure_filters(
-    filter_list="filters_to_use.dat",
+    filter_list=args.filter_list,
     filter_path=str(OBS_DIR),
     mean_sigma_file=f"mean_sigma_{NOISE_PREFIX}.npy",
     std_sigma_file=f"std_sigma_{NOISE_PREFIX}.npy",
