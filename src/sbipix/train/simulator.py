@@ -62,8 +62,13 @@ def _ssfr_mass_slope_from_z(zval):
 
 
 def _mean_log_ssfr(logmass, zval):
-    """Mean log-sSFR model: μ(z) + B(z) * (logM - 10)."""
-    mu_z = -10.0 + 0.8 * np.log10(1.0 + max(float(zval), 0.0))
+    """Mean log-sSFR model: μ(z) + B(z) * (logM - 10).
+
+    Coefficient 2.8 matches the Schreiber+2015 main-sequence z-evolution
+    (vs original 0.8 which was ~1 dex too low at z>1, causing atlas SEDs
+    to be too red/UV-faint and driving the +0.45 dex mass bias).
+    """
+    mu_z = -10.0 + 2.8 * np.log10(1.0 + max(float(zval), 0.0))
     b_z = _ssfr_mass_slope_from_z(float(zval))
     return mu_z + b_z * (float(logmass) - 10.0)
 
@@ -151,8 +156,7 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
                              filter_list='filter_list.dat', filt_dir='filters/',
                              norm_method='median', z_step=0.01, sp=None,
                              cosmology=None, fname=None, path='pregrids/',
-                             lam_array_spline=[], rseed=None, isochrone_type='padova_2007',
-                             add_stellar_remnants=True):
+                             lam_array_spline=[], rseed=None):
     """
     Generate a pregrid of galaxy properties and corresponding SEDs using parametric SFH.
     
@@ -189,11 +193,6 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         Wavelength array for spline interpolation (default: [])
     rseed : int, optional
         Random seed override (default: None)
-    isochrone_type : str, optional
-        FSPS isochrone library: 'padova_2007', 'padova_1994', etc. (default: 'padova_2007')
-    add_stellar_remnants : bool, optional
-        Include stellar remnants (white dwarfs, neutron stars) in M/L calculation (default: True).
-        Set to False to use only surviving stellar mass, matching observations.
 
     Returns
     -------
@@ -227,14 +226,9 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
             compute_vega_mags=False, zcontinuous=1, sfh=0, imf_type=1,
             logzsol=0.0, dust_type=2, dust2=0.0, add_neb_emission=True
         )
-        # Set properties after initialization (FSPS convention)
-        sp.isochrone_type = isochrone_type
-        sp.add_stellar_remnants = add_stellar_remnants
 
     print('Generating atlas with:')
     print(f'N_pregrid: {N_pregrid}, Parametric SFH (delayed-tau model)')
-    print(f'FSPS isochrone type: {isochrone_type}')
-    print(f'FSPS add_stellar_remnants: {add_stellar_remnants}')
     
     if rseed is not None:
         print(f'Setting random seed to: {rseed}')

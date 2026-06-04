@@ -92,7 +92,7 @@ SIMULATION_CONFIG = {
     "mass_max": 11.5,
     "sfr_prior_type": "sSFRlognormal",
     "ssfr_min": -12.5,
-    "ssfr_max": -7.0,   # v2: was -8.5, raised to avoid clipping star-forming galaxies at z>2
+    "ssfr_max": -6.5,   # v3: raised from -7.0; new sSFR prior mean at z>2 reaches ~-8.5 so need headroom
     "z_prior": "flat",
     "z_min": 0.0,
     "z_max": 5.0,
@@ -101,7 +101,7 @@ SIMULATION_CONFIG = {
     "dust_model": "Calzetti",
     "dust_prior": "flat",
     "Av_min": 0.0,
-    "Av_max": 3.0,
+    "Av_max": 1.5,   # v3: reduced from 3.0; atlas Av was +1.1 mag above real (mean 1.5 vs ~0.4)
     "tx_alpha": 0.7,
 }
 
@@ -684,8 +684,6 @@ def build_validation_model(args, obs_dir, library_dir):
     model.infer_z = False
     model.include_limit = True
     model.include_sigma = True
-    model.isochrone_type = args.isochrone_type
-    model.add_stellar_remnants = not args.no_stellar_remnants
     model.configure_noise_model(
         sigma_sampler=args.sigma_sampler,
         detection_model=args.detection_model,
@@ -926,12 +924,6 @@ def build_parser():
     p.add_argument("--calibrate", action="store_true",
                    help="Apply per-band median magnitude calibration after mock-matching: "
                         "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
-    p.add_argument("--isochrone-type", type=str, default="padova_2007",
-                   choices=["padova_2007", "padova_1994"],
-                   help="FSPS isochrone library to use (default: padova_2007; use padova_1994 for BC03-like SSPs)")
-    p.add_argument("--no-stellar-remnants", action="store_true",
-                   help="Exclude stellar remnants (white dwarfs, neutron stars) from M/L calculation. "
-                        "Use to test if mass definition mismatch contributes to bias.")
     return p
 
 

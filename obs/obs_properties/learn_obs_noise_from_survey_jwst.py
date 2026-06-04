@@ -186,7 +186,7 @@ def main():
     limits = compute_background_limits(phot, err, SNR_THRESHOLD)
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    prefix = "cweb_jwst"
+    prefix = "north_cweb_jwst"
 
     print(f"\n5. Saving output files (prefix: {prefix})...")
     np.save(os.path.join(OUT_DIR, f"lam_eff_{prefix}.npy"), lam_eff)

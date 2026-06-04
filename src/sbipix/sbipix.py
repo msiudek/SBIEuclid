@@ -681,14 +681,11 @@ class sbipix():
         # Generate atlas based on SFH type
         if self.parametric:
             print("Generating parametric (τ-delayed) SFH atlas...")
-            isochrone_type = getattr(self, 'isochrone_type', 'padova_2007')
-            add_stellar_remnants = getattr(self, 'add_stellar_remnants', True)
             generate_atlas_parametric(
                 priors, N_pregrid=self.n_simulation,
                 fname=self.atlas_name, store=True, path=self.atlas_path,
                 filter_list=dense_basis_filter_list, filt_dir=self.filter_path,
-                norm_method='none', isochrone_type=isochrone_type,
-                add_stellar_remnants=add_stellar_remnants
+                norm_method='none'
             )
         else:
             print("Generating non-parametric (Dirichlet) SFH atlas...")
