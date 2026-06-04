@@ -235,12 +235,14 @@ def main():
     grid_sig_mock_444w = cell_median(sig_mock_444w, z_mock, logM_mock)
 
     # ──────────────────────────────────────────────────────────────────────
-    # 7. Plot magnitude grids (like Euclid mag_grid.png)
+    # 7. Plot magnitude grids (with delta_mag showing systematic offset)
     # ──────────────────────────────────────────────────────────────────────
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle("Median Magnitude in (z, logM) cells — COSMOS-Web | mock noiseless | mock noisy | Δ(mock-real)", fontsize=12)
+    fig, axes = plt.subplots(2, 4, figsize=(18, 10))
+    fig.suptitle("Median Magnitude in (z, logM) cells — COSMOS-Web | mock noiseless | mock noisy | Δmag(mock-real)", fontsize=12)
 
-    vmin_mag, vmax_mag = 18, 28
+    vmin_mag, vmax_mag = 18, 35  # Extended range to see faint end
+
+    vmin_delta, vmax_delta = -2, 2  # Delta mag colorbar
 
     # F277W
     im = axes[0, 0].imshow(grid_mag_real_277w, origin="lower", cmap="viridis", aspect="auto",
@@ -258,6 +260,11 @@ def main():
                            extent=[Z_EDGES[0], Z_EDGES[-1], M_EDGES[0], M_EDGES[-1]], vmin=vmin_mag, vmax=vmax_mag)
     axes[0, 2].set_title("F277W mock noisy", fontsize=11)
     plt.colorbar(im, ax=axes[0, 2], label="mag")
+
+    im = axes[0, 3].imshow(grid_delta_277w, origin="lower", cmap="RdBu_r", aspect="auto",
+                           extent=[Z_EDGES[0], Z_EDGES[-1], M_EDGES[0], M_EDGES[-1]], vmin=vmin_delta, vmax=vmax_delta)
+    axes[0, 3].set_title("F277W Δmag (noisy - real)", fontsize=11)
+    plt.colorbar(im, ax=axes[0, 3], label="Δmag")
 
     # F444W
     im = axes[1, 0].imshow(grid_mag_real_444w, origin="lower", cmap="viridis", aspect="auto",
@@ -278,6 +285,12 @@ def main():
     axes[1, 2].set_title("F444W mock noisy", fontsize=11)
     axes[1, 2].set_xlabel("z", fontsize=10)
     plt.colorbar(im, ax=axes[1, 2], label="mag")
+
+    im = axes[1, 3].imshow(grid_delta_444w, origin="lower", cmap="RdBu_r", aspect="auto",
+                           extent=[Z_EDGES[0], Z_EDGES[-1], M_EDGES[0], M_EDGES[-1]], vmin=vmin_delta, vmax=vmax_delta)
+    axes[1, 3].set_title("F444W Δmag (noisy - real)", fontsize=11)
+    axes[1, 3].set_xlabel("z", fontsize=10)
+    plt.colorbar(im, ax=axes[1, 3], label="Δmag")
 
     plt.tight_layout()
     mag_plot = outdir / "mag_grid.png"
