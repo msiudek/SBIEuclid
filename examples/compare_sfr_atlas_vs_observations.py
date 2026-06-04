@@ -81,8 +81,10 @@ def load_observations():
         return None, None
 
     z_obs = np.array(ref_hdu[z_col], dtype=float)
-    logSFR_obs = np.log10(np.clip(np.array(ref_hdu[sfr_col], dtype=float), 1e-10, None))
-    logM_obs = np.log10(np.array(ref_hdu[mass_col], dtype=float))
+    # NOTE: sfr_med is ALREADY in log10 space from LePhare! Don't take log again
+    logSFR_obs = np.array(ref_hdu[sfr_col], dtype=float)
+    # NOTE: mass_med is ALREADY in log10 space from LePhare!
+    logM_obs = np.array(ref_hdu[mass_col], dtype=float)
 
     # Filter valid entries
     valid = np.isfinite(z_obs) & np.isfinite(logSFR_obs) & np.isfinite(logM_obs) & \
