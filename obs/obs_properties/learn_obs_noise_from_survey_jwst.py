@@ -11,7 +11,7 @@ def _trapezoid(y, x):
         return trapezoid(y, x)
     return getattr(np, "trapz")(y, x)
 
-FITS_PATH = "/home/msiudek/myspace/projects/COSMOS/COSMOSWeb_mastercatalog_v1.fits"
+FITS_PATH = "/mnt/data_proj/iac18_aasensio_shared/sbi_euclid/SBIEuclid/obs/obs_properties/COSMOS/COSMOSWeb_mastercatalog_v1.fits"
 FILTER_LIST_FILE = "filters_to_use_jwst.dat"
 FILTER_DIR = "."
 OUT_DIR = "."
