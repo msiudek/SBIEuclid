@@ -261,6 +261,10 @@ def main():
     z_col = _find_first_existing_column(ref_hdu, ["zpdf_med", "z_lephare", "z"])
     mass_col = _find_first_existing_column(ref_hdu, ["mass_med", "logM_lephare", "logM"])
 
+    # Try to find TWO mass definitions (formed vs surviving)
+    mass_col_formed = _find_first_existing_column(ref_hdu, ["mass_med", "mass_formed", "stellar_mass_formed"])
+    mass_col_surviving = _find_first_existing_column(ref_hdu, ["mass_living", "stellar_mass_living", "mass_surviving"])
+
     if z_col is None:
         raise KeyError("No redshift column found (tried: zpdf_med, z_lephare, z)")
     if mass_col is None:
@@ -270,6 +274,18 @@ def main():
 
     z_ref    = np.array(ref_hdu[z_col],        dtype=float)
     mass_ref = np.array(ref_hdu[mass_col],     dtype=float)
+
+    # Load both mass definitions if available
+    if mass_col_formed and mass_col_surviving and mass_col_formed != mass_col_surviving:
+        mass_formed = np.array(ref_hdu[mass_col_formed], dtype=float)
+        mass_surviving = np.array(ref_hdu[mass_col_surviving], dtype=float)
+        print(f"\n✓ Found TWO mass definitions:")
+        print(f"  Formed: {mass_col_formed}")
+        print(f"  Surviving: {mass_col_surviving}")
+    else:
+        mass_formed = mass_ref.copy()
+        mass_surviving = mass_ref.copy()
+        print(f"\n⚠ Only one mass definition available: {mass_col}")
 
     # Try to find error columns; if not present, set to NaN
     mass_lo_col = _find_first_existing_column(ref_hdu, ["mass_l68", "logM_l68_lephare"])
@@ -575,10 +591,44 @@ def main():
     # ------------------------------------------------------------------
     # 7. Diagnostics
     # ------------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("MASS BIAS COMPARISON: Formed vs Surviving Definition")
+    print("=" * 70)
+
+    # Compare against both mass definitions
+    mass_formed_sel = mass_formed[sel]
+    mass_surviving_sel = mass_surviving[sel]
+
+    valid_formed = np.isfinite(logM_med) & np.isfinite(mass_formed_sel)
+    valid_surviving = np.isfinite(logM_med) & np.isfinite(mass_surviving_sel)
+
+    if np.any(valid_formed):
+        delta_formed = logM_med[valid_formed] - mass_formed_sel[valid_formed]
+        print(f"\nvs FORMED mass:")
+        print(f"  N = {valid_formed.sum()}")
+        print(f"  Median Δ(SBI-Formed)   = {np.median(delta_formed):+.3f} dex")
+        print(f"  NMAD(Δ)                = {1.4826 * np.median(np.abs(delta_formed - np.median(delta_formed))):.3f} dex")
+
+    if np.any(valid_surviving):
+        delta_surviving = logM_med[valid_surviving] - mass_surviving_sel[valid_surviving]
+        print(f"\nvs SURVIVING mass:")
+        print(f"  N = {valid_surviving.sum()}")
+        print(f"  Median Δ(SBI-Surviving) = {np.median(delta_surviving):+.3f} dex")
+        print(f"  NMAD(Δ)                 = {1.4826 * np.median(np.abs(delta_surviving - np.median(delta_surviving))):.3f} dex")
+
+    if np.any(valid_formed) and np.any(valid_surviving):
+        diff = np.median(delta_formed) - np.median(delta_surviving)
+        print(f"\nDifference (Formed - Surviving): {diff:+.3f} dex")
+        if abs(diff) > 0.1:
+            print(f"⚠️  SIGNIFICANT: Mass definition mismatch contributes {abs(diff):.2f} dex to bias!")
+
+    # Use primary mass definition for standard diagnostics
     valid = np.isfinite(logM_med) & np.isfinite(mass_sel)
     delta = logM_med[valid] - mass_sel[valid]
     r, _ = pearsonr(mass_sel[valid], logM_med[valid])
-    print(f"\nMass comparison (N={valid.sum()}):")
+    print(f"\n" + "=" * 70)
+    print(f"Standard mass comparison (using {mass_col}):")
+    print("=" * 70)
     print(f"  Pearson r              = {r:.3f}")
     print(f"  Median Δ(SBI-LePhare)  = {np.median(delta):.3f} dex")
     print(f"  NMAD(Δ)                = {1.4826 * np.median(np.abs(delta - np.median(delta))):.3f} dex")
