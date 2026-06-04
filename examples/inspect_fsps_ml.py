@@ -19,6 +19,7 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+import h5py
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -37,40 +38,56 @@ def parse_args():
 
 
 def load_atlas(atlas_name):
-    """Load .dbatlas pickle file."""
+    """Load .dbatlas file (HDF5 hickle format)."""
     atlas_path = LIB_DIR / atlas_name
     print(f"Loading atlas: {atlas_path}")
     if not atlas_path.exists():
         raise FileNotFoundError(f"Atlas not found: {atlas_path}")
 
-    with open(atlas_path, "rb") as f:
-        atlas = pickle.load(f)
+    # Load HDF5 hickle format
+    with h5py.File(atlas_path, "r") as f:
+        atlas = {}
+        data_group = f["data"]
 
+        # Load arrays, removing quotes from key names
+        # Note: mstar and sfr are already in log10 space
+        if '"mstar"' in data_group:
+            atlas["logM"] = data_group['"mstar"'][:]  # Already log10(M/M☉)
+        if '"sfr"' in data_group:
+            atlas["logSFR"] = data_group['"sfr"'][:]  # Already log10(SFR)
+        if '"zval"' in data_group:
+            atlas["z"] = data_group['"zval"'][:]
+        if '"sed"' in data_group:
+            atlas["x"] = data_group['"sed"'][:]  # Fluxes in JWST bands
+        if '"met"' in data_group:
+            atlas["Z_sun"] = data_group['"met"'][:]
+        if '"sfh_tuple"' in data_group:
+            atlas["sfh_tuple"] = data_group['"sfh_tuple"'][:]
+
+    print(f"  Loaded as HDF5 hickle format")
     return atlas
 
 
 def extract_ml_from_atlas(atlas):
     """
-    Extract M/L ratios from atlas.
+    Extract stellar mass and SFR from atlas.
 
-    Atlas structure:
-    - atlas['theta']: (n_gal, 2) array of [logM, logSFR]
-    - atlas['x']: (n_gal, n_filt) array of fluxes
-
-    M/L can be computed as: M/L = 10^logM / (flux_in_band / distance^2)
-    But for comparison, we need to work in the same units as observations.
-
-    Alternative: compare the stellar mass directly since both use the same
-    stellar population model basis.
+    Atlas structure (HDF5 hickle):
+    - atlas['logM']: (n_gal,) array of log stellar mass
+    - atlas['logSFR']: (n_gal,) array of log SFR
+    - atlas['z']: (n_gal,) array of redshift
+    - atlas['x']: (n_gal, n_filt) array of fluxes (JWST bands)
     """
-    theta = atlas["theta"]
+    logM = atlas["logM"]
+    logSFR = atlas["logSFR"]
     x = atlas["x"]
-    logM = theta[:, 0]
-    logSFR = theta[:, 1]
+    z = atlas.get("z", None)
 
-    print(f"Atlas shape: {theta.shape}")
+    print(f"Atlas size: {len(logM)} galaxies")
     print(f"  logM range: [{logM.min():.2f}, {logM.max():.2f}]")
     print(f"  logSFR range: [{logSFR.min():.2f}, {logSFR.max():.2f}]")
+    if z is not None:
+        print(f"  z range: [{z.min():.2f}, {z.max():.2f}]")
     print(f"  Flux shape: {x.shape}")
 
     return logM, logSFR, x
