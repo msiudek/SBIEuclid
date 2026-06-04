@@ -663,10 +663,11 @@ def build_validation_model(args, obs_dir, library_dir):
     from sbipix import sbipix
 
     model = sbipix()
-    noise_prefix = f"north_{args.phot_type}"
+    # Use custom noise_prefix if provided, otherwise derive from phot_type
+    noise_prefix = args.noise_prefix if args.noise_prefix else f"north_{args.phot_type}"
     limits_file = f"background_noise_{noise_prefix}.npy"
     model.configure_filters(
-        filter_list="filters_to_use.dat",
+        filter_list=args.filter_list,
         filter_path=str(obs_dir),
         mean_sigma_file=f"mean_sigma_{noise_prefix}.npy",
         std_sigma_file=f"std_sigma_{noise_prefix}.npy",
@@ -902,6 +903,8 @@ def build_parser():
     p.add_argument("--phot-type", default="3fwhm",
                    choices=["2fwhm", "3fwhm", "templfit"],
                    help="Photometry type to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
+    p.add_argument("--noise-prefix", type=str, default=None,
+                   help="Custom noise model prefix (e.g., 'north_cweb_jwst'). If not specified, derived from phot-type as 'north_{phot_type}'")
     p.add_argument("--n-sim", type=int, default=10000,
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
     p.add_argument("--atlas-name", type=str, default="atlas_obs_euclid_north_validate",
