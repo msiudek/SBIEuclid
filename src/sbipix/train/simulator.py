@@ -218,8 +218,9 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
     if sp is None:
         import fsps
         sp = fsps.StellarPopulation(
-            compute_vega_mags=False, zcontinuous=1, sfh=0, imf_type=1, 
-            logzsol=0.0, dust_type=2, dust2=0.0, add_neb_emission=True
+            compute_vega_mags=False, zcontinuous=1, sfh=0, imf_type=1,
+            logzsol=0.0, dust_type=2, dust2=0.0, add_neb_emission=True,
+            add_stellar_remnants=False  # Only count living stars, not white dwarfs/neutron stars
         )
 
     print('Generating atlas with:')
