@@ -90,12 +90,13 @@ def build_parser():
     )
     p.add_argument(
         "--phot-type",
-        choices=["2fwhm", "3fwhm", "templfit"],
+        choices=["2fwhm", "3fwhm", "templfit", "cweb_jwst"],
         default="templfit",
         help=(
             "Photometry type used for noise model and mock matching. "
             "'templfit' uses template-fit fluxes (flux_{stem}_templfit; VIS: flux_vis_psf). "
-            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. Default: templfit"
+            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. 'cweb_jwst' uses JWST NIRCam photometry. "
+            "Default: templfit"
         ),
     )
     p.add_argument(
