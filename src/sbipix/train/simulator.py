@@ -147,11 +147,12 @@ def _enforce_target_ssfr(
     return sfh, final_delta
 
 
-def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True, 
-                             filter_list='filter_list.dat', filt_dir='filters/', 
-                             norm_method='median', z_step=0.01, sp=None, 
-                             cosmology=None, fname=None, path='pregrids/', 
-                             lam_array_spline=[], rseed=None):
+def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
+                             filter_list='filter_list.dat', filt_dir='filters/',
+                             norm_method='median', z_step=0.01, sp=None,
+                             cosmology=None, fname=None, path='pregrids/',
+                             lam_array_spline=[], rseed=None, isochrone_type='padova_2007',
+                             add_stellar_remnants=True):
     """
     Generate a pregrid of galaxy properties and corresponding SEDs using parametric SFH.
     
@@ -188,6 +189,11 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         Wavelength array for spline interpolation (default: [])
     rseed : int, optional
         Random seed override (default: None)
+    isochrone_type : str, optional
+        FSPS isochrone library: 'padova_2007', 'padova_1994', etc. (default: 'padova_2007')
+    add_stellar_remnants : bool, optional
+        Include stellar remnants (white dwarfs, neutron stars) in M/L calculation (default: True).
+        Set to False to use only surviving stellar mass, matching observations.
 
     Returns
     -------
@@ -219,11 +225,14 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         import fsps
         sp = fsps.StellarPopulation(
             compute_vega_mags=False, zcontinuous=1, sfh=0, imf_type=1,
-            logzsol=0.0, dust_type=2, dust2=0.0, add_neb_emission=True
+            logzsol=0.0, dust_type=2, dust2=0.0, add_neb_emission=True,
+            isochrone_type=isochrone_type, add_stellar_remnants=add_stellar_remnants
         )
 
     print('Generating atlas with:')
     print(f'N_pregrid: {N_pregrid}, Parametric SFH (delayed-tau model)')
+    print(f'FSPS isochrone type: {isochrone_type}')
+    print(f'FSPS add_stellar_remnants: {add_stellar_remnants}')
     
     if rseed is not None:
         print(f'Setting random seed to: {rseed}')

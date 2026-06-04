@@ -684,6 +684,8 @@ def build_validation_model(args, obs_dir, library_dir):
     model.infer_z = False
     model.include_limit = True
     model.include_sigma = True
+    model.isochrone_type = args.isochrone_type
+    model.add_stellar_remnants = not args.no_stellar_remnants
     model.configure_noise_model(
         sigma_sampler=args.sigma_sampler,
         detection_model=args.detection_model,
@@ -924,6 +926,12 @@ def build_parser():
     p.add_argument("--calibrate", action="store_true",
                    help="Apply per-band median magnitude calibration after mock-matching: "
                         "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
+    p.add_argument("--isochrone-type", type=str, default="padova_2007",
+                   choices=["padova_2007", "padova_1994"],
+                   help="FSPS isochrone library to use (default: padova_2007; use padova_1994 for BC03-like SSPs)")
+    p.add_argument("--no-stellar-remnants", action="store_true",
+                   help="Exclude stellar remnants (white dwarfs, neutron stars) from M/L calculation. "
+                        "Use to test if mass definition mismatch contributes to bias.")
     return p
 
 
