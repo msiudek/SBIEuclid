@@ -72,7 +72,16 @@ def _mean_log_ssfr(logmass, zval):
     return mu_z + b_z * (float(logmass) - 10.0)
 
 
-def _sample_stellar_age(age_universe_gyr, min_frac=0.2, max_frac=0.7):
+# Stellar-age prior bounds as a fraction of the universe age at the galaxy's z.
+# Env-var tunable so the M/L excess (outshining / hidden-old-mass) can be swept
+# on the server without code edits, then verified with ml_color_atlas_vs_real.py
+# before any retrain. Lower bounds -> younger galaxies -> less hidden old mass
+# -> lower M/L (the v3 atlas M/L was too high by +0.4..+0.9 dex, growing with z).
+_AGE_MIN_FRAC = float(os.getenv("SBIPIX_AGE_MIN_FRAC", "0.05"))
+_AGE_MAX_FRAC = float(os.getenv("SBIPIX_AGE_MAX_FRAC", "0.45"))
+
+
+def _sample_stellar_age(age_universe_gyr, min_frac=_AGE_MIN_FRAC, max_frac=_AGE_MAX_FRAC):
     """Sample stellar age (Gyr) as a fraction of universe age."""
     age_u = float(age_universe_gyr)
     if (not np.isfinite(age_u)) or age_u <= 0:
