@@ -92,7 +92,7 @@ SIMULATION_CONFIG = {
     "mass_max": 11.5,
     "sfr_prior_type": "sSFRlognormal",
     "ssfr_min": -12.5,
-    "ssfr_max": -7.0,   # v2: was -8.5, raised to avoid clipping star-forming galaxies at z>2
+    "ssfr_max": -6.5,   # v3: raised from -7.0; new sSFR prior mean at z>2 reaches ~-8.5 so need headroom
     "z_prior": "flat",
     "z_min": 0.0,
     "z_max": 5.0,
@@ -101,7 +101,7 @@ SIMULATION_CONFIG = {
     "dust_model": "Calzetti",
     "dust_prior": "flat",
     "Av_min": 0.0,
-    "Av_max": 3.0,
+    "Av_max": 1.5,   # v3: reduced from 3.0; atlas Av was +1.1 mag above real (mean 1.5 vs ~0.4)
     "tx_alpha": 0.7,
 }
 
