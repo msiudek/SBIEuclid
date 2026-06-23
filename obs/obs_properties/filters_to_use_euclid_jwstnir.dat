@@ -1,0 +1,12 @@
+FILTERS_EUCLID/Euclid_NISP.H.dat        NISP-H       h
+FILTERS_EUCLID/Euclid_NISP.J.dat        NISP-J       j
+FILTERS_EUCLID/Euclid_NISP.Y.dat        NISP-Y       y
+FILTERS_EUCLID/Euclid_VIS.vis.dat       VIS          vis
+FILTERS_HSC/Subaru_HSC.g.dat            HSC-g        g_ext_hsc
+FILTERS_HSC/Subaru_HSC.z.dat            HSC-z        z_ext_hsc
+FILTERS_DECam/CTIO_DECam.g.dat          DECam-g      g_ext_decam
+FILTERS_DECam/CTIO_DECam.r.dat          DECam-r      r_ext_decam
+FILTERS_DECam/CTIO_DECam.i.dat          DECam-i      i_ext_decam
+FILTERS_DECam/CTIO_DECam.z.dat          DECam-z      z_ext_decam
+FILTERS_JWST/JWST_NIRCam.F277W.dat   NIRCam-F277W   f277w
+FILTERS_JWST/JWST_NIRCam.F444W.dat   NIRCam-F444W   f444w
