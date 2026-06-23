@@ -112,6 +112,13 @@ def parse_args():
                    help="Output directory for results and plots")
     p.add_argument("--model-name",  type=str,   default=MODEL_NAME,
                    help=f"Model filename in library/ (default: {MODEL_NAME})")
+    p.add_argument("--filter-list", type=str,   default="filters_to_use.dat",
+                   help="Filter list file; bands are derived from it (default: filters_to_use.dat; "
+                        "use filters_to_use_euclid_jwstnir.dat for Euclid+JWST-NIR)")
+    p.add_argument("--noise-prefix", type=str,  default=None,
+                   help="Custom noise model prefix. If unset, derived as 'north_{phot_type}'")
+    p.add_argument("--catalog",     type=str,   default=None,
+                   help="Override input catalog path (default: matched_euclid_cosmosweb.fits)")
     p.add_argument("--sample-with", type=str, default="rejection", choices=["rejection", "mcmc"],
                    help="Posterior sampling backend (default: rejection)")
     p.add_argument("--phot-type",   type=str, default="templfit",
@@ -248,13 +255,22 @@ def run_inference_at_threshold(sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, a
 
 # ── main ──────────────────────────────────────────────────────────────────
 def main():
+    global FILTER_STEMS, FILTER_NAMES, N_FILT
     from sbipix import sbipix
     from sbipix.utils import validation_plots as vplots
+    from sbipix.utils.sed_utils import load_filter_metadata
 
     args = parse_args()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         print("WARNING: CUDA requested but not available. Falling back to CPU.")
         args.device = "cpu"
+
+    # Derive bands from the requested filter list (so 12-band Euclid+JWST works)
+    _meta = load_filter_metadata(args.filter_list, filt_dir=str(OBS_DIR))
+    FILTER_STEMS = [m["col_stem"] for m in _meta]
+    FILTER_NAMES = [m["short"]    for m in _meta]
+    N_FILT = len(FILTER_STEMS)
+    print(f"Loaded {N_FILT} filters from {args.filter_list}: {', '.join(FILTER_NAMES)}")
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -264,14 +280,15 @@ def main():
     # ------------------------------------------------------------------
     # 1. Load catalog and apply selection
     # ------------------------------------------------------------------
-    print(f"Loading catalog: {CATALOG}")
-    cat = Table.read(CATALOG)
+    catalog_path = args.catalog if args.catalog else str(CATALOG)
+    print(f"Loading catalog: {catalog_path}")
+    cat = Table.read(catalog_path)
     N_total = len(cat)
     print(f"  {N_total} total matched galaxies")
 
     validate_requested_phot_type(cat, requested_phot_type)
     effective_phot_type = requested_phot_type
-    noise_prefix = f"north_{effective_phot_type}"
+    noise_prefix = args.noise_prefix if args.noise_prefix else f"north_{effective_phot_type}"
     print(f"Photometry type: {effective_phot_type}  (noise prefix: {noise_prefix})")
 
     # Build flux and fluxerr arrays (n_gal, n_filt) in μJy
@@ -374,7 +391,7 @@ def main():
     print("\nConfiguring sbipix model...")
     sx = sbipix()
     sx.configure_filters(
-        filter_list="filters_to_use.dat",
+        filter_list=args.filter_list,
         filter_path=str(OBS_DIR),
         mean_sigma_file=f"mean_sigma_{noise_prefix}.npy",
         std_sigma_file=f"std_sigma_{noise_prefix}.npy",

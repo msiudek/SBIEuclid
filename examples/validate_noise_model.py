@@ -663,10 +663,11 @@ def build_validation_model(args, obs_dir, library_dir):
     from sbipix import sbipix
 
     model = sbipix()
-    noise_prefix = f"north_{args.phot_type}"
+    # Use custom noise_prefix if provided, otherwise derive from phot_type
+    noise_prefix = args.noise_prefix if args.noise_prefix else f"north_{args.phot_type}"
     limits_file = f"background_noise_{noise_prefix}.npy"
     model.configure_filters(
-        filter_list="filters_to_use.dat",
+        filter_list=args.filter_list,
         filter_path=str(obs_dir),
         mean_sigma_file=f"mean_sigma_{noise_prefix}.npy",
         std_sigma_file=f"std_sigma_{noise_prefix}.npy",
@@ -900,6 +901,10 @@ def build_parser():
     p.add_argument("--phot-type", default="3fwhm",
                    choices=["2fwhm", "3fwhm", "templfit"],
                    help="Photometry type to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
+    p.add_argument("--filter-list", type=str, default="filters_to_use.dat",
+                   help="Filter list file (default: filters_to_use.dat; use filters_to_use_euclid_jwstnir.dat for Euclid+JWST-NIR)")
+    p.add_argument("--noise-prefix", type=str, default=None,
+                   help="Custom noise model prefix. If not specified, derived from phot-type as 'north_{phot_type}'")
     p.add_argument("--n-sim", type=int, default=10000,
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
     p.add_argument("--atlas-name", type=str, default="atlas_obs_euclid_north_validate",
@@ -923,7 +928,14 @@ def build_parser():
 
 
 def main():
+    global _FILTER_META, FILTER_SHORT, FILTER_COL_STEMS
     args = build_parser().parse_args()
+
+    # Reload filters from the specified filter list (default: filters_to_use.dat)
+    _FILTER_META = load_filter_metadata(args.filter_list, filt_dir=str(_OBS_DIR))
+    FILTER_SHORT     = [m["short"]    for m in _FILTER_META]
+    FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
+    print(f"Loaded {len(_FILTER_META)} filters from {args.filter_list}: {', '.join(FILTER_SHORT)}")
 
     if args.n_sim < 10000:
         print(f"NOTE: n_sim={args.n_sim} is fine for a local smoke test, but ~10000+ is recommended for validation.")

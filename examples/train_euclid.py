@@ -99,6 +99,18 @@ def build_parser():
         ),
     )
     p.add_argument(
+        "--filter-list",
+        default="filters_to_use.dat",
+        help="Filter list file (default: filters_to_use.dat; use "
+             "filters_to_use_euclid_jwstnir.dat for the Euclid+JWST-NIR test)",
+    )
+    p.add_argument(
+        "--noise-prefix",
+        default=None,
+        help="Custom noise model prefix. If unset, derived from phot-type as "
+             "'north_{phot_type}'. Use a distinct prefix for combined-band noise.",
+    )
+    p.add_argument(
         "--sigma-sampler",
         choices=["empirical", "truncnorm", "mag_lognormal"],
         default="mag_lognormal",
@@ -188,16 +200,17 @@ def build_phot_col(stem, phot_type, err=False):
         return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
     return f"{prefix}_{stem}_{phot_type}_aper"
 
-NOISE_PREFIX = f"north_{args.phot_type}"
+NOISE_PREFIX = args.noise_prefix if args.noise_prefix else f"north_{args.phot_type}"
 NONDET_MAG = 99.0
 SNR_DETECTION_THRESHOLD = 3.0
 MAG_BRIGHT = 16.0
 MAG_FAINT = 30.0
 PATCH_ID = 65879
 
-_FILTER_META = load_filter_metadata("filters_to_use.dat", filt_dir=str(OBS_DIR))
+_FILTER_META = load_filter_metadata(args.filter_list, filt_dir=str(OBS_DIR))
 FILTER_SHORT = [m["short"] for m in _FILTER_META]
 FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
+print(f"Loaded {len(_FILTER_META)} filters from {args.filter_list}: {', '.join(FILTER_SHORT)}")
 
 
 def load_real_mag_for_mock_match(phot_type):
@@ -306,7 +319,7 @@ def draw_resample_indices(weights, n_out, seed=0):
 sx = sbipix()
 
 sx.configure_filters(
-    filter_list="filters_to_use.dat",
+    filter_list=args.filter_list,
     filter_path=str(OBS_DIR),
     mean_sigma_file=f"mean_sigma_{NOISE_PREFIX}.npy",
     std_sigma_file=f"std_sigma_{NOISE_PREFIX}.npy",
