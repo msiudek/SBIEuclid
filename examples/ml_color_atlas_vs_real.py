@@ -42,14 +42,14 @@ SURVEY = {
                        "DECam-g", "DECam-r", "DECam-i", "DECam-z"],
         "red_idx":    0,   # NISP-H (reddest)
         "blue_idx":   3,   # VIS  →  color = VIS - H
-        "catalog":    "/home/msiudek/myspace/projects/EUCLID/DR1/SBI_workingversion/obs/obs_properties/COSMOS-Web/matched_euclid_cosmosweb.fits",
+        "catalog":    str(ROOT / "obs" / "obs_properties" / "COSMOS-Web" / "matched_euclid_cosmosweb.fits"),
         "catalog_hdu": 1,
         "color_bins": np.linspace(-0.5, 4.5, 24),
         # real-flux loader: returns (flux_red, flux_blue) in µJy
         "flux_cols":  {"red": "flux_h_templfit", "blue": "flux_vis_psf"},
-        "z_col":      "zfinal",
-        "mass_col":   "mass_med",
-        "sfr_col":    "sfr_med",
+        "z_col":      "z_lephare",
+        "mass_col":   "logM_lephare",
+        "sfr_col":    "logSFR_lephare",
         "snr_cols":   ["flux_h_templfit", "fluxerr_h_templfit"],
     },
     "jwst": {

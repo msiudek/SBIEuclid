@@ -29,7 +29,7 @@ ROOT    = Path(__file__).resolve().parents[1]
 LIB_DIR = ROOT / "library"
 COSMO   = FlatLambdaCDM(H0=70, Om0=0.3)
 
-CATALOG = "/home/msiudek/myspace/projects/EUCLID/DR1/SBI_workingversion/obs/obs_properties/COSMOS-Web/matched_euclid_cosmosweb.fits"
+CATALOG = str(ROOT / "obs" / "obs_properties" / "COSMOS-Web" / "matched_euclid_cosmosweb.fits")
 RED_IDX, BLUE_IDX = 0, 3            # NISP-H, VIS  (color = VIS - H)
 COLOR_BINS = np.linspace(-0.5, 4.5, 26)
 Z_BINS = [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]   # reliable VIS-H regime (z<3)
@@ -80,8 +80,8 @@ def main():
     cat = Table.read(args.catalog)
     rFred  = np.array(cat["flux_h_templfit"], dtype=float)
     rFblue = np.array(cat["flux_vis_psf"],    dtype=float)
-    rZ = np.array(cat["zfinal"],   dtype=float)
-    rM = np.array(cat["mass_med"], dtype=float)
+    rZ = np.array(cat["z_lephare"],   dtype=float)
+    rM = np.array(cat["logM_lephare"], dtype=float)
     ferr = np.array(cat["fluxerr_h_templfit"], dtype=float) if "fluxerr_h_templfit" in cat.colnames else None
     snr = np.abs(rFred / np.where((ferr is not None) & (ferr > 0), ferr, np.nan)) if ferr is not None else np.full(len(cat), 99.0)
     good = (np.isfinite(rZ) & (rZ > 0) & np.isfinite(rM) & (rM > 4)

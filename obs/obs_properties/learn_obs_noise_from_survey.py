@@ -85,24 +85,27 @@ def compute_lambda_eff(entries):
     return np.array(lam_eff)
 
 
-def load_from_fits(fits_path, entries, phot_type, patch_id=98):
+def load_from_fits(fits_path, entries, phot_type, patch_id=98, skip_patch=False):
     """Load photometry and errors from COSMOS-Deep FITS for one photometry type."""
     cat = Table.read(fits_path)
     print(f"Total rows: {len(cat)}")
 
-    # Filter by patch_id
-    patch_col = cat["patch_id_list"]
-    patch_int = int(patch_id) if not isinstance(patch_id, (int, np.integer)) else patch_id
-    mask_list = []
-    for val in patch_col:
-        try:
-            scalar = np.asarray(val).item()
-            mask_list.append(int(scalar) == patch_int)
-        except (ValueError, TypeError):
-            mask_list.append(False)
-    mask = np.array(mask_list, dtype=bool)
-    cat = cat[mask]
-    print(f"Rows after patch filter: {len(cat)}")
+    if skip_patch:
+        print("Patch filter skipped (using all rows)")
+    else:
+        # Filter by patch_id
+        patch_col = cat["patch_id_list"]
+        patch_int = int(patch_id) if not isinstance(patch_id, (int, np.integer)) else patch_id
+        mask_list = []
+        for val in patch_col:
+            try:
+                scalar = np.asarray(val).item()
+                mask_list.append(int(scalar) == patch_int)
+            except (ValueError, TypeError):
+                mask_list.append(False)
+        mask = np.array(mask_list, dtype=bool)
+        cat = cat[mask]
+        print(f"Rows after patch filter: {len(cat)}")
 
     phot_list = []
     err_list = []
@@ -210,13 +213,25 @@ def compute_background_limits(phot_ujy, err_ujy, snr_threshold=2.0, faint_percen
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="Generate noise feature files from a survey FITS catalog")
+    ap.add_argument("--fits", default=FITS_PATH, help="input catalog (default: COSMOS_DEEP_PHZ.fits)")
+    ap.add_argument("--filter-list", default=FILTER_LIST_FILE, help="filter list .dat")
+    ap.add_argument("--prefix", default=HEMISPHERE,
+                    help="output prefix stem; files are <prefix>_<phot_type>.npy (default: north)")
+    ap.add_argument("--phot-types", nargs="+", default=PHOT_TYPES, help="photometry types to process")
+    ap.add_argument("--skip-patch", action="store_true",
+                    help="skip patch_id filtering (use for matched catalogs covering all patches)")
+    ap.add_argument("--out-dir", default=OUT_DIR)
+    args = ap.parse_args()
+
     print("=" * 60)
     print("NOISE FEATURE COMPUTATION")
     print("=" * 60)
 
     # Load filter metadata (path, short name, FITS col_stem) from .dat file
     print("\n1. Loading filter metadata...")
-    entries = load_filter_metadata(FILTER_LIST_FILE, FILTER_DIR)
+    entries = load_filter_metadata(args.filter_list, FILTER_DIR)
     n_filters = len(entries)
     print(f"   {n_filters} filters: {', '.join(e['short'] for e in entries)}")
 
@@ -227,31 +242,32 @@ def main():
     print(f"   SNR threshold for detections: {SNR_THRESHOLD}")
 
     # Save outputs directory
-    os.makedirs(OUT_DIR, exist_ok=True)
-    print(f"\n3. Output directory: {os.path.abspath(OUT_DIR)}")
+    out_dir = args.out_dir
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"\n3. Output directory: {os.path.abspath(out_dir)}")
 
     # Process each photometry type independently and write separate files
-    for phot_type in PHOT_TYPES:
-        prefix = f"{HEMISPHERE}_{phot_type}"
+    for phot_type in args.phot_types:
+        prefix = f"{args.prefix}_{phot_type}"
         print(f"\n4. Processing phot_type: {phot_type}")
-        phot, err = load_from_fits(FITS_PATH, entries, phot_type, PATCH_ID)
+        phot, err = load_from_fits(args.fits, entries, phot_type, PATCH_ID, skip_patch=args.skip_patch)
 
         percentiles, mean_sigma, std_sigma, sigma_samples = compute_noise_features(
             phot, err, PERCENTILE_CUTS, SNR_THRESHOLD
         )
         limits = compute_background_limits(phot, err, SNR_THRESHOLD)
 
-        np.save(os.path.join(OUT_DIR, f"lam_eff_{prefix}.npy"), lam_eff)
+        np.save(os.path.join(out_dir, f"lam_eff_{prefix}.npy"), lam_eff)
         print(f"   ✓ lam_eff_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"percentiles_{prefix}.npy"), percentiles)
+        np.save(os.path.join(out_dir, f"percentiles_{prefix}.npy"), percentiles)
         print(f"   ✓ percentiles_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"mean_sigma_{prefix}.npy"), mean_sigma)
+        np.save(os.path.join(out_dir, f"mean_sigma_{prefix}.npy"), mean_sigma)
         print(f"   ✓ mean_sigma_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"std_sigma_{prefix}.npy"), std_sigma)
+        np.save(os.path.join(out_dir, f"std_sigma_{prefix}.npy"), std_sigma)
         print(f"   ✓ std_sigma_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"sigma_samples_{prefix}.npy"), sigma_samples)
+        np.save(os.path.join(out_dir, f"sigma_samples_{prefix}.npy"), sigma_samples)
         print(f"   ✓ sigma_samples_{prefix}.npy")
-        np.save(os.path.join(OUT_DIR, f"background_noise_{prefix}.npy"), limits)
+        np.save(os.path.join(out_dir, f"background_noise_{prefix}.npy"), limits)
         print(f"   ✓ background_noise_{prefix}.npy")
 
     print("\n" + "=" * 60)
