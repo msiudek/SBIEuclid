@@ -35,7 +35,11 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--euclid-cat", required=True, help="matched_euclid_cosmosweb.fits")
     p.add_argument("--cosweb-cat", required=True,
-                   help="COSMOS-Web catalog that cosweb_idx indexes (has JWST NIRCam fluxes)")
+                   help="COSMOS-Web master catalog that cosweb_id indexes (has JWST NIRCam fluxes)")
+    p.add_argument("--join-key", default="cosweb_id",
+                   help="column in euclid-cat that is a row index into cosweb-cat (default: cosweb_id)")
+    p.add_argument("--euclid-zcol", default="z_lephare",
+                   help="redshift col in euclid-cat for join validation (default: z_lephare)")
     p.add_argument("--cosweb-hdu", type=int, default=1, help="HDU with JWST photometry")
     p.add_argument("--cosweb-zcol", default="zpdf_med",
                    help="redshift col in cosweb-cat for join validation (in its ref HDU)")
@@ -54,9 +58,10 @@ def parse_args():
 def main():
     args = parse_args()
     e = Table.read(args.euclid_cat)
-    if "cosweb_idx" not in e.colnames:
-        raise KeyError("euclid-cat has no 'cosweb_idx' column to join on")
-    ci = np.array(e["cosweb_idx"], dtype=int)
+    if args.join_key not in e.colnames:
+        raise KeyError(f"euclid-cat has no '{args.join_key}' column to join on "
+                       f"(available id-like: {[c for c in e.colnames if 'id' in c.lower()]})")
+    ci = np.array(e[args.join_key], dtype=int)
 
     phot = Table.read(args.cosweb_cat, hdu=args.cosweb_hdu)
     n_master = len(phot)
@@ -68,7 +73,7 @@ def main():
     try:
         ref = Table.read(args.cosweb_cat, hdu=args.cosweb_refhdu)
         z_cw = np.array(ref[args.cosweb_zcol], dtype=float)[ci]
-        z_eu = np.array(e["zfinal"], dtype=float)
+        z_eu = np.array(e[args.euclid_zcol], dtype=float)
         ok = np.isfinite(z_cw) & np.isfinite(z_eu) & (z_eu > 0)
         dz = np.median(np.abs(z_eu[ok] - z_cw[ok]))
         print(f"[join validation] median|z_euclid - z_cosweb| = {dz:.4f} (N={ok.sum()})")
