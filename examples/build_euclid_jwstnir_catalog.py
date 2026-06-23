@@ -45,10 +45,17 @@ def parse_args():
                    help="redshift col in cosweb-cat for join validation (in its ref HDU)")
     p.add_argument("--cosweb-refhdu", type=int, default=2,
                    help="HDU in cosweb-cat holding zpdf_med/mass_med for validation")
-    p.add_argument("--f277-col", default="flux_aper_f277w")
-    p.add_argument("--f444-col", default="flux_aper_f444w")
-    p.add_argument("--f277-err", default="flux_err_aper_f277w")
-    p.add_argument("--f444-err", default="flux_err_aper_f444w")
+    # Use TOTAL JWST fluxes (Kron 'auto') to match Euclid total (templfit) and the
+    # FSPS atlas (total). flux_aper is a small-aperture flux ~1.8 mag too faint ->
+    # SED discontinuity -> 0% posterior acceptance. flux_model is an alternative total.
+    p.add_argument("--f277-col", default="flux_auto_f277w")
+    p.add_argument("--f444-col", default="flux_auto_f444w")
+    p.add_argument("--f277-err", default="flux_err_auto_f277w")
+    p.add_argument("--f444-err", default="flux_err_auto_f444w")
+    p.add_argument("--euclid-hcol", default="flux_h_templfit",
+                   help="Euclid total-flux band for the color sanity check")
+    p.add_argument("--max-color", type=float, default=0.7,
+                   help="abort if |median(H - F277W)| exceeds this (aperture/total mismatch)")
     p.add_argument("--out", required=True)
     p.add_argument("--max-dz", type=float, default=0.1,
                    help="abort if median|z_euclid - z_cosweb| on join exceeds this")
@@ -101,6 +108,23 @@ def main():
 
     det = np.isfinite(f277) & (f277 > 0) & np.isfinite(f444) & (f444 > 0)
     print(f"JWST NIR fluxes attached: {det.sum()}/{len(out)} have valid F277W&F444W")
+
+    # ── color sanity: Euclid total H vs JWST F277W must be a physical SED ─
+    fh = np.array(e[args.euclid_hcol], dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        h_mag    = np.where(fh > 0,   -2.5 * np.log10(fh / 3631e6),   np.nan)
+        f277_mag = np.where(f277 > 0, -2.5 * np.log10(f277 / 3631e6), np.nan)
+    ok = np.isfinite(h_mag) & np.isfinite(f277_mag)
+    med_color = float(np.nanmedian((h_mag - f277_mag)[ok]))
+    print(f"[color sanity] median(H - F277W) = {med_color:+.2f} mag (physical: ~0)")
+    if abs(med_color) > args.max_color:
+        raise SystemExit(
+            f"ABORT: |median(H - F277W)|={abs(med_color):.2f} > {args.max_color}. "
+            "JWST flux is not on the same (total) system as Euclid — use total fluxes "
+            "(flux_auto_* or flux_model_*), NOT flux_aper_*. Mixing aperture+total "
+            "fluxes makes an SED no FSPS mock matches -> 0% posterior acceptance.")
+    print("[color sanity] PASSED")
+
     out.write(args.out, overwrite=True)
     print(f"✓ wrote {args.out}  (cols: Euclid + flux_f277w_templfit, flux_f444w_templfit)")
 
