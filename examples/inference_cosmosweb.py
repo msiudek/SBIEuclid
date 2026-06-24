@@ -58,12 +58,27 @@ TRAIN_LOGSFR_MAX = 3.0
 
 
 # ── photometry column helper ───────────────────────────────────────────────
+# Optional explicit column-name templates (set in main() from
+# --flux-template/--fluxerr-template). When provided they override the Euclid
+# phot_type naming entirely, making the integrated-photometry ingestion
+# schema-agnostic — e.g. for JADES, --flux-template "{stem}_flux".
+FLUX_TEMPLATE = None
+FLUXERR_TEMPLATE = None
+
+
 def build_phot_col(stem, phot_type, err=False):
     """Return flux/fluxerr column name for a filter stem and photometry type.
 
-    phot_type='templfit': flux_{stem}_templfit, except VIS → flux_vis_psf.
-    phot_type='2fwhm'/'3fwhm': flux_{stem}_{phot_type}_aper.
+    If FLUX_TEMPLATE/FLUXERR_TEMPLATE are set, they are used verbatim with a
+    `{stem}` placeholder (e.g. "{stem}_flux"), so any integrated catalog works.
+
+    Euclid default (no template):
+      phot_type='templfit': flux_{stem}_templfit, except VIS → flux_vis_psf.
+      phot_type='2fwhm'/'3fwhm': flux_{stem}_{phot_type}_aper.
     """
+    tmpl = FLUXERR_TEMPLATE if err else FLUX_TEMPLATE
+    if tmpl is not None:
+        return tmpl.format(stem=stem)
     prefix = "fluxerr" if err else "flux"
     if phot_type == "templfit":
         return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
@@ -119,6 +134,28 @@ def parse_args():
                    help="Custom noise model prefix. If unset, derived as 'north_{phot_type}'")
     p.add_argument("--catalog",     type=str,   default=None,
                    help="Override input catalog path (default: matched_euclid_cosmosweb.fits)")
+    # ── integrated-photometry schema overrides (for non-Euclid catalogs, e.g. JADES) ──
+    p.add_argument("--flux-template", type=str, default=None,
+                   help="Flux column template with {stem} placeholder, e.g. '{stem}_flux'. "
+                        "Overrides the Euclid phot_type naming (makes ingestion schema-agnostic).")
+    p.add_argument("--fluxerr-template", type=str, default=None,
+                   help="Flux-error column template with {stem}, e.g. '{stem}_flux_err'. "
+                        "Required together with --flux-template.")
+    p.add_argument("--z-col",       type=str, default="z_lephare",
+                   help="Reference redshift column (default: z_lephare)")
+    p.add_argument("--mass-col",    type=str, default="logM_lephare",
+                   help="Reference log stellar mass column (default: logM_lephare)")
+    p.add_argument("--mass-lo-col", type=str, default="logM_l68_lephare",
+                   help="Reference mass lower-68 column; ignored if absent (default: logM_l68_lephare)")
+    p.add_argument("--mass-hi-col", type=str, default="logM_u68_lephare",
+                   help="Reference mass upper-68 column; ignored if absent (default: logM_u68_lephare)")
+    p.add_argument("--sfr-col",     type=str, default=None,
+                   help="Reference log SFR column; if unset, auto-detect from common names")
+    p.add_argument("--sfr-lo-col",  type=str, default=None, help="Reference logSFR lower-68 column")
+    p.add_argument("--sfr-hi-col",  type=str, default=None, help="Reference logSFR upper-68 column")
+    p.add_argument("--ref-label",   type=str, default="cosmosweb",
+                   help="Label for reference columns saved in the npz, e.g. 'prospector' for "
+                        "JADES. Keys become logM_{label}, logSFR_{label}, ... (default: cosmosweb)")
     p.add_argument("--sample-with", type=str, default="rejection", choices=["rejection", "mcmc"],
                    help="Posterior sampling backend (default: rejection)")
     p.add_argument("--phot-type",   type=str, default="templfit",
@@ -255,12 +292,19 @@ def run_inference_at_threshold(sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, a
 
 # ── main ──────────────────────────────────────────────────────────────────
 def main():
-    global FILTER_STEMS, FILTER_NAMES, N_FILT
+    global FILTER_STEMS, FILTER_NAMES, N_FILT, FLUX_TEMPLATE, FLUXERR_TEMPLATE
     from sbipix import sbipix
     from sbipix.utils import validation_plots as vplots
     from sbipix.utils.sed_utils import load_filter_metadata
 
     args = parse_args()
+    if (args.flux_template is None) != (args.fluxerr_template is None):
+        raise SystemExit("--flux-template and --fluxerr-template must be given together.")
+    FLUX_TEMPLATE = args.flux_template
+    FLUXERR_TEMPLATE = args.fluxerr_template
+    if FLUX_TEMPLATE is not None:
+        print(f"Integrated-photometry column templates: flux='{FLUX_TEMPLATE}', "
+              f"err='{FLUXERR_TEMPLATE}'")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         print("WARNING: CUDA requested but not available. Falling back to CPU.")
         args.device = "cpu"
@@ -308,19 +352,33 @@ def main():
             "(re-run the catalog matching script to add them)."
         ) from exc
 
-    # Reference values (matched_euclid_cosmosweb.fits: LePhare + z_lephare)
-    z_ref    = np.array(cat["z_lephare"],        dtype=float)
-    mass_ref = np.array(cat["logM_lephare"],     dtype=float)   # log10(M/Msun)
-    mass_lo  = np.array(cat["logM_l68_lephare"], dtype=float)
-    mass_hi  = np.array(cat["logM_u68_lephare"], dtype=float)
+    # Reference values (configurable; defaults = matched_euclid_cosmosweb LePhare schema)
+    def _opt_col(name):
+        """Read an optional column by name; return all-NaN if missing/None."""
+        if name and name in cat.colnames:
+            return np.array(cat[name], dtype=float)
+        return np.full(len(cat), np.nan)
 
-    # SFR reference columns (logSFR_lephare is log10 M☉/yr)
-    sfr_ref_col = _find_first_existing_column(
-        cat, ["logSFR_lephare", "sfr_med", "logsfr_med", "sfr", "log_sfr"])
-    sfr_lo_col  = _find_first_existing_column(
-        cat, ["logSFR_l68_lephare", "sfr_l68", "logsfr_l68", "sfr_lo", "log_sfr_lo"])
-    sfr_hi_col  = _find_first_existing_column(
-        cat, ["logSFR_u68_lephare", "sfr_u68", "logsfr_u68", "sfr_hi", "log_sfr_hi"])
+    if args.z_col not in cat.colnames:
+        raise KeyError(f"redshift column '{args.z_col}' not in catalog (set --z-col)")
+    if args.mass_col not in cat.colnames:
+        raise KeyError(f"mass column '{args.mass_col}' not in catalog (set --mass-col)")
+    z_ref    = np.array(cat[args.z_col],    dtype=float)
+    mass_ref = np.array(cat[args.mass_col], dtype=float)   # log10(M/Msun)
+    mass_lo  = _opt_col(args.mass_lo_col)
+    mass_hi  = _opt_col(args.mass_hi_col)
+    print(f"Reference columns: z='{args.z_col}', logM='{args.mass_col}'")
+
+    # SFR reference columns: explicit --sfr-col if given, else auto-detect.
+    sfr_ref_col = (args.sfr_col if (args.sfr_col and args.sfr_col in cat.colnames)
+                   else _find_first_existing_column(
+        cat, ["logSFR_lephare", "sfr_med", "logsfr_med", "sfr", "log_sfr"]))
+    sfr_lo_col  = (args.sfr_lo_col if (args.sfr_lo_col and args.sfr_lo_col in cat.colnames)
+                   else _find_first_existing_column(
+        cat, ["logSFR_l68_lephare", "sfr_l68", "logsfr_l68", "sfr_lo", "log_sfr_lo"]))
+    sfr_hi_col  = (args.sfr_hi_col if (args.sfr_hi_col and args.sfr_hi_col in cat.colnames)
+                   else _find_first_existing_column(
+        cat, ["logSFR_u68_lephare", "sfr_u68", "logsfr_u68", "sfr_hi", "log_sfr_hi"]))
 
     if sfr_ref_col is not None:
         sfr_ref = np.array(cat[sfr_ref_col], dtype=float)
@@ -588,15 +646,16 @@ def main():
     # 6. Save results
     # ------------------------------------------------------------------
     result_file = outdir / "inference_results.npz"
+    lab = args.ref_label
     np.savez(result_file,
              logM_sbi=logM_med, logM_sbi_lo=logM_lo, logM_sbi_hi=logM_hi,
              logSFR_sbi=logSFR_med,
-             logM_cosmosweb=mass_sel,
-             logM_cosmosweb_lo=mass_lo_sel,
-             logM_cosmosweb_hi=mass_hi_sel,
-             logSFR_cosmosweb=sfr_sel,
-             logSFR_cosmosweb_lo=sfr_lo_sel,
-             logSFR_cosmosweb_hi=sfr_hi_sel,
+             **{f"logM_{lab}": mass_sel,
+                f"logM_{lab}_lo": mass_lo_sel,
+                f"logM_{lab}_hi": mass_hi_sel,
+                f"logSFR_{lab}": sfr_sel,
+                f"logSFR_{lab}_lo": sfr_lo_sel,
+                f"logSFR_{lab}_hi": sfr_hi_sel},
              z=z_sel, n_bands=nbands_sel,
              posteriors=posteriors,
              selected_indices=sel)
