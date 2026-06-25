@@ -9,10 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import sklearn.metrics as sm
-try:
-    import fsps
-except Exception:
-    fsps = None
+import fsps
 import dense_basis as db
 from dense_basis import make_filvalkit_simple, calc_fnu_sed_fast
 from sbipix.utils.sed_utils import mag_conversion
@@ -22,7 +19,6 @@ from tqdm import tqdm, trange
 import os
 import h5py
 import glob
-import pickle
 from matplotlib.lines import Line2D
 
 # Set matplotlib parameters
@@ -117,7 +113,7 @@ def plot_theta(sbipix_model, bins=50, limit_sfr=False, range_sfr=(-10, 2),
     plt.tight_layout()
     
     if save:
-        save_name = filename or 'parameter_histograms.png'
+        save_name = filename or 'parameter_histograms.pdf'
         plt.savefig(save_name, bbox_inches='tight', dpi=300)
         print(f"Saved plot to {save_name}")
     
@@ -247,112 +243,15 @@ def plot_test_performance(sbipix_model, n_test=1000, n_theta=None, save=False,
         )
         
         if save:
-            import os
-            os.makedirs('./sbi-logs', exist_ok=True)
             if name is None:
                 suffix = 'tau' if sbipix_model.parametric else 'dirichlet'
-                filename = f'./sbi-logs/test_performance_{suffix}_{i}.png'
+                filename = f'./plots/test_performance_{suffix}_{i}.pdf'
             else:
-                filename = f'./sbi-logs/{name}{i}.png'
-            plt.savefig(filename, bbox_inches='tight', dpi=150)
+                filename = f'./plots/{name}{i}.pdf'
+            plt.savefig(filename, bbox_inches='tight', dpi=300)
             print(f"Saved plot to {filename}")
         
         plt.show()
-
-
-def plot_training_history(sbipix_model, save=False, filename=None, figsize=(7, 5)):
-    """
-    Plot training/validation log-probability history from saved SNPE object.
-
-    Parameters
-    ----------
-    sbipix_model : SBIPIX
-        SBIPIX model instance with model_path/model_name configured.
-    save : bool, optional
-        Whether to save plot (default: False)
-    filename : str, optional
-        Output filename if save=True.
-    figsize : tuple, optional
-        Figure size (default: (7, 5)).
-
-    Returns
-    -------
-    str or None
-        Saved filename if save=True and history exists, else None.
-    """
-    anpe_file = sbipix_model.model_path + 'anpe_' + sbipix_model.model_name
-    if not os.path.exists(anpe_file):
-        print(f"Training history skipped: file not found: {anpe_file}")
-        return None
-
-    try:
-        with open(anpe_file, 'rb') as f:
-            anpe = pickle.load(f)
-    except Exception as exc:
-        print(f"Training history skipped: could not load {anpe_file} ({exc})")
-        return None
-
-    summary = getattr(anpe, 'summary', None)
-    if summary is None:
-        summary = getattr(anpe, '_summary', None)
-    if summary is None:
-        print("Training history skipped: no summary found on SNPE object")
-        return None
-
-    train_hist = summary.get('training_log_probs', None)
-    val_hist = summary.get('validation_log_probs', None)
-    y_label = 'Log probability'
-    title = 'SNPE training history'
-    best_val = summary.get('best_validation_log_prob', None)
-
-    if train_hist is None and val_hist is None:
-        train_hist = summary.get('training_loss', None)
-        val_hist = summary.get('validation_loss', None)
-        y_label = 'Loss'
-        title = 'SNPE training loss history'
-        best_val = summary.get('best_validation_loss', best_val)
-
-    if train_hist is None and val_hist is None:
-        print("Training history skipped: no training/validation curves in summary")
-        return None
-
-    plt.figure(figsize=figsize)
-    if train_hist is not None and len(train_hist) > 0:
-        plt.plot(np.arange(1, len(train_hist) + 1), train_hist, label='Train', lw=2)
-    if val_hist is not None and len(val_hist) > 0:
-        plt.plot(np.arange(1, len(val_hist) + 1), val_hist, label='Validation', lw=2)
-
-    if best_val is not None:
-        try:
-            best_val_scalar = float(np.ravel(best_val)[-1])
-            if np.isfinite(best_val_scalar):
-                plt.axhline(
-                    best_val_scalar,
-                    ls='--',
-                    lw=1.5,
-                    color='k',
-                    alpha=0.6,
-                    label=f'Best val={best_val_scalar:.3f}',
-                )
-        except Exception:
-            pass
-
-    plt.xlabel('Epoch')
-    plt.ylabel(y_label)
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc='best')
-    plt.tight_layout()
-
-    out = None
-    if save:
-        os.makedirs('./sbi-logs', exist_ok=True)
-        out = filename or './sbi-logs/training_history.png'
-        plt.savefig(out, bbox_inches='tight', dpi=150)
-        print(f"Saved plot to {out}")
-
-    plt.show()
-    return out
 
 
 def plot_performance_obs_from_catalog(sbipix_model, parameter='z', save=False, 
@@ -662,24 +561,18 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     
     # Load effective wavelengths
-    filter_path = getattr(sx, 'filter_path', path_obs_properties)
-    lam_eff_filename = getattr(sx, 'lam_eff_file', 'lam_eff.npy')
-    lam_eff_file = os.path.join(filter_path, lam_eff_filename)
-    n_filters = int(getattr(sx, 'n_filters', len(phot)))
-    n_filters = min(n_filters, len(phot), len(err))
+    lam_eff_file = path_obs_properties + 'lam_eff.npy'
     if os.path.exists(lam_eff_file):
-        lam_eff = np.load(lam_eff_file)[:n_filters] / 1e4
+        lam_eff = np.load(lam_eff_file)[:19] / 1e4
     else:
         # Default JADES effective wavelengths (in microns)
         lam_eff = np.array([0.90, 1.15, 1.50, 1.82, 2.00, 2.10, 2.77, 3.35, 3.56, 
                            4.10, 4.30, 4.44, 4.60, 4.80, 0.435, 0.606, 0.775, 0.814, 0.850])
-        lam_eff = lam_eff[:n_filters]
     
     # Load background limits if available
     if hasattr(sx, 'limits') or show_background:
         try:
-            limits_path = os.path.join(filter_path, getattr(sx, 'limits_file', os.path.basename(limits_file)))
-            limits = np.load(limits_path)
+            limits = np.load(limits_file)
         except:
             limits = None
     else:
@@ -688,11 +581,8 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
     # Apply limits to observations
     obs_sed = np.copy(phot)
     obs_err = np.copy(err)
-    obs_sed = obs_sed[:n_filters]
-    obs_err = obs_err[:n_filters]
     
     if limits is not None:
-        limits = limits[:n_filters]
         for i in range(len(limits)):
             if obs_sed[i] < limits[i]:
                 obs_sed[i] = limits[i]
@@ -732,8 +622,8 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
             
             # Calculate photometry
             filcurves, _, _ = make_filvalkit_simple(lam, z, 
-                                                  fkit_name=sx.filter_list,
-                                                  filt_dir=filter_path)
+                                                  fkit_name='filters_jades_no_wfc.dat',
+                                                  filt_dir=path_obs_properties)
             sed_csp_ujy = calc_fnu_sed_fast(spec_csp_ujy, filcurves)
             
             # Plot spectrum
@@ -808,8 +698,8 @@ def plot_posterior_templates_sbipix(sx, galaxy_id, phot, err, z, posteriors, sp=
         
         # Calculate and plot best photometry
         filcurves, _, _ = make_filvalkit_simple(lam, z, 
-                                              fkit_name=sx.filter_list,
-                                              filt_dir=filter_path)
+                                              fkit_name='filters_jades_no_wfc.dat',
+                                              filt_dir=path_obs_properties)
         sed_best = calc_fnu_sed_fast(spec_best, filcurves)
         ax.plot(lam_eff, sed_best, 'o', markersize=10, alpha=0.8,
                markerfacecolor="None", markeredgecolor='tab:orange')

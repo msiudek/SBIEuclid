@@ -15,151 +15,6 @@ import dense_basis as db
 from ..utils.sed_utils import sfh_delayed_exponential, convert_to_microjansky
 
 
-def calc_fnu_sed_lam_weighted(fnuspec, filcurves, lam_z):
-    """
-    Filter integration with λ-weighting (photon-counting detector formula).
-
-    Computes:  filvals[i] = Σ T(λ)·F_ν(λ)·λ  /  Σ T(λ)·λ
-
-    This is the correct formula for CCD/NIR photon-counting detectors where the
-    detector response is proportional to photon count (∝ λ) rather than energy.
-    Compare to the unweighted formula used in dense_basis.calc_fnu_sed_fast:
-        filvals[i] = Σ T(λ)·F_ν(λ)  /  Σ T(λ)   (energy-detector, uniform-grid)
-    """
-    filvals = np.zeros(filcurves.shape[1])
-    for tindex in range(filcurves.shape[1]):
-        nonzero = filcurves[:, tindex] > 0
-        T = filcurves[nonzero, tindex]
-        F = fnuspec[nonzero]
-        L = lam_z[nonzero]
-        denom = np.sum(T * L)
-        if denom > 0:
-            filvals[tindex] = np.sum(T * F * L) / denom
-        else:
-            filvals[tindex] = 0.0
-    return filvals
-
-
-def _to_scalar(value):
-    """Convert scalar-like/array-like prior sample to a Python float."""
-    arr = np.asarray(value)
-    if arr.size == 0:
-        raise ValueError("Received empty prior sample")
-    return float(arr.reshape(-1)[0])
-
-
-def _ssfr_mass_slope_from_z(zval):
-    """Piecewise mass-slope term B(z) for log-sSFR relation."""
-    if zval < 1.0:
-        return -0.08
-    if zval < 2.0:
-        return -0.15
-    if zval < 3.0:
-        return -0.22
-    if zval < 4.0:
-        return -0.28
-    return -0.34
-
-
-def _mean_log_ssfr(logmass, zval):
-    """Mean log-sSFR model: μ(z) + B(z) * (logM - 10).
-
-    Coefficient 2.8 matches the Schreiber+2015 main-sequence z-evolution.
-    Original 0.8 was ~1 dex too low at z>1, driving a +0.45 dex mass bias.
-    """
-    mu_z = -10.0 + 2.8 * np.log10(1.0 + max(float(zval), 0.0))
-    b_z = _ssfr_mass_slope_from_z(float(zval))
-    return mu_z + b_z * (float(logmass) - 10.0)
-
-
-# Stellar-age prior bounds as a fraction of the universe age at the galaxy's z.
-# Env-var tunable so the M/L excess (outshining / hidden-old-mass) can be swept
-# on the server without code edits, then verified with ml_color_atlas_vs_real.py
-# before any retrain. Lower bounds -> younger galaxies -> less hidden old mass
-# -> lower M/L (the v3 atlas M/L was too high by +0.4..+0.9 dex, growing with z).
-_AGE_MIN_FRAC = float(os.getenv("SBIPIX_AGE_MIN_FRAC", "0.05"))
-_AGE_MAX_FRAC = float(os.getenv("SBIPIX_AGE_MAX_FRAC", "0.45"))
-
-
-def _sample_stellar_age(age_universe_gyr, min_frac=_AGE_MIN_FRAC, max_frac=_AGE_MAX_FRAC):
-    """Sample stellar age (Gyr) as a fraction of universe age."""
-    age_u = float(age_universe_gyr)
-    if (not np.isfinite(age_u)) or age_u <= 0:
-        return 0.1
-
-    lo = float(np.clip(min_frac, 0.01, 0.95))
-    hi = float(np.clip(max_frac, lo + 1e-3, 0.99))
-    frac = np.random.uniform(lo, hi)
-    min_age = 0.05
-    max_age = max(0.95 * age_u, min_age)
-    return float(np.clip(frac * age_u, min_age, max_age))
-
-
-def _enforce_target_ssfr(
-    sfh_gyr,
-    timeax_gyr,
-    logmass_target,
-    target_log_ssfr,
-    n_iter=4,
-    recent_floor_frac=0.2,
-):
-    """
-    Iteratively enforce a target log-sSFR while keeping total formed mass fixed.
-
-    Parameters
-    ----------
-    sfh_gyr : np.ndarray
-        SFH in Msun/Gyr.
-    timeax_gyr : np.ndarray
-        Time axis in Gyr.
-    logmass_target : float
-        Target log10 formed stellar mass used to renormalize SFH integral.
-    target_log_ssfr : float
-        Target log10(sSFR/yr^-1).
-    n_iter : int
-        Number of correction iterations.
-    """
-    sfh = np.asarray(sfh_gyr, dtype=float).copy()
-    timeax = np.asarray(timeax_gyr, dtype=float)
-    if sfh.size == 0 or timeax.size == 0:
-        return sfh, np.inf
-
-    recent_mask = timeax >= (np.max(timeax) - 0.1)  # last 100 Myr window
-    if not np.any(recent_mask):
-        recent_mask[-1] = True
-
-    target_mass = 10 ** float(logmass_target)
-    target_recent_sfr_yr = (10 ** float(target_log_ssfr)) * target_mass
-    floor_recent_sfr_yr = max(recent_floor_frac * target_recent_sfr_yr, 1e-12)
-    floor_recent_sfr_gyr = floor_recent_sfr_yr * 1e9
-    dt = np.gradient(timeax)
-
-    for _ in range(max(int(n_iter), 1)):
-        recent_sfr_yr = np.mean(sfh[recent_mask]) / 1e9
-        if (not np.isfinite(recent_sfr_yr)) or (recent_sfr_yr <= 0):
-            break
-
-        current_log_ssfr = np.log10(recent_sfr_yr) - float(logmass_target)
-        delta = float(target_log_ssfr) - current_log_ssfr
-
-        scale_recent = np.clip(10 ** delta, 0.1, 10.0)
-        sfh[recent_mask] *= scale_recent
-        sfh[recent_mask] = np.maximum(sfh[recent_mask], floor_recent_sfr_gyr)
-
-        current_mass = np.sum(sfh * dt)
-        if np.isfinite(current_mass) and current_mass > 0:
-            sfh *= (target_mass / current_mass)
-
-    recent_sfr_yr = np.mean(sfh[recent_mask]) / 1e9
-    if (not np.isfinite(recent_sfr_yr)) or (recent_sfr_yr <= 0):
-        final_delta = np.inf
-    else:
-        achieved_log_ssfr = np.log10(recent_sfr_yr) - float(logmass_target)
-        final_delta = float(target_log_ssfr) - achieved_log_ssfr
-
-    return sfh, final_delta
-
-
 def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True, 
                              filter_list='filter_list.dat', filt_dir='filters/', 
                              norm_method='median', z_step=0.01, sp=None, 
@@ -256,63 +111,27 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
     for i in tqdm(range(int(N_pregrid)), desc="Generating parametric SEDs"):
         # Sample parameters from priors
         
-        zval = _to_scalar(priors.sample_z_prior())
-        massval = _to_scalar(priors.sample_mass_prior())
-        age_gyr = float(cosmology.age(zval).value)
+        zval = priors.sample_z_prior()
+        massval = priors.sample_mass_prior()
 
-        target_log_ssfr = None
-        if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
-            mean_log_ssfr = _mean_log_ssfr(massval, zval)
-            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
-            if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
-                target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
+        # Sample τ-delayed SFH parameters
+        ti = np.random.uniform(0.0, cosmology.age(zval).value)[0] # Time when SF began, cosmic (Gyr)
+        tau =  10**(np.random.uniform(np.log10(1e-2), np.log10(100)))  # Timescale of decrease (Gyr)
 
-        stellar_age = _sample_stellar_age(age_gyr)
-        ssfr_ok = True
-        max_attempts = 6
-        for _ in range(max_attempts):
-            # Build SFH on FSPS-expected age axis: 0 -> stellar_age
-            t = np.linspace(0.0, max(stellar_age, 1e-3), 1000)
-            ti_max = max(0.3 * stellar_age, 1e-3)
-            ti = np.random.uniform(0.0, ti_max, size=1)[0]  # Time when SF began (Gyr since birth)
-            tau = stellar_age * 10 ** np.random.uniform(-0.5, 0.3)  # ~0.3–2× tage
-            sfh, timeax = sfh_delayed_exponential(t, massval, tau, ti)  # Msun/Gyr
-
-            if target_log_ssfr is None:
-                break
-
-            sfh, ssfr_delta = _enforce_target_ssfr(
-                sfh,
-                timeax,
-                massval,
-                target_log_ssfr,
-                n_iter=4,
-                recent_floor_frac=0.2,
-            )
-            if np.isfinite(ssfr_delta) and abs(ssfr_delta) <= 0.3:
-                ssfr_ok = True
-                break
-            ssfr_ok = False
-            stellar_age = _sample_stellar_age(age_gyr)
-        else:
-            # If all retries fail, keep the best effort SFH from the last attempt.
-            pass
-
-        if target_log_ssfr is not None and not ssfr_ok:
-            # Best-effort fallback retained from final attempt.
-            pass
-
-        sfh = sfh / 1e9  # Convert M☉/Gyr -> M☉/yr for FSPS tabular SFH
+        # Generate SFH
+        t = np.linspace(0, cosmology.age(zval).value, 1000)
+        sfh, timeax = sfh_delayed_exponential(t, massval, tau, ti)
+        sfh = sfh / 1e9  # Convert M☉/Gyr -> M☉/yr
 
         # Sample other parameters
-        dust = _to_scalar(priors.sample_Av_prior())
-        met = _to_scalar(priors.sample_Z_prior())
+        dust = priors.sample_Av_prior()
+        met = priors.sample_Z_prior()
         
         # Ensure SFH is valid
         sfh = np.where(np.isnan(sfh) | (sfh < 1e-33), 1.1e-33, sfh)
 
         # Generate spectrum
-        specdetails = [sfh, timeax, dust, met, zval, stellar_age]
+        specdetails = [sfh, timeax, dust, met, zval]
 
         if len(lam_array_spline) > 0:
             sed = makespec_parametric(
@@ -349,17 +168,14 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
 
             # Use pre-computed filter grid
             fc_index = np.argmin(np.abs(zval - fc_zgrid))
-            sed = calc_fnu_sed_lam_weighted(spec_ujy, fcs[:, :, fc_index], lzs[:, fc_index])
+            sed = db.calc_fnu_sed_fast(spec_ujy, fcs[:, :, fc_index])
 
         # Normalization
         norm_fac = 1.0
         sed = sed / norm_fac
         mstar = np.log10(sp.stellar_mass / norm_fac)
         mformed = np.log10(sp.formed_mass / norm_fac)
-        recent_mask_yr = timeax >= (np.max(timeax) - 0.1)
-        if not np.any(recent_mask_yr):
-            recent_mask_yr[-1] = True
-        sfr = np.log10(np.mean(sfh[recent_mask_yr]))  # Averaged over last 100 Myr
+        sfr = np.log10(np.mean(sfh[-100:]))  # Averaged over last 100 Myr
 
         # Store SFH parameters
         sfh_tuple = np.array([mstar, mformed, sfr, tau, ti, Nparam])
@@ -424,8 +240,7 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
     ----------
     specdetails : list
         If input_sfh=False: [sfh_tuple, dust, met, zval]
-        If input_sfh=True: [sfh, timeax, dust, met, zval] or
-                          [sfh, timeax, dust, met, zval, stellar_age]
+        If input_sfh=True: [sfh, timeax, dust, met, zval]
     priors : dense_basis.Priors object
         Prior distributions object
     sp : fsps.StellarPopulation
@@ -467,12 +282,7 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
     sp.params['imf_type'] = 1  # Chabrier
 
     # Extract parameters
-    if len(specdetails) >= 6:
-        [sfh, tax, dust, met, zval, stellar_age] = specdetails[:6]
-    else:
-        [sfh, tax, dust, met, zval] = specdetails
-        stellar_age = float(np.max(np.asarray(tax, dtype=float)))
-
+    [sfh, tax, dust, met, zval] = specdetails
     sp.params['dust2'] = dust
     sp.params['logzsol'] = met
     sp.params['gas_logz'] = met  # Match stellar to gas-phase metallicity
@@ -482,23 +292,10 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
     sfh = np.where(np.isnan(sfh) | (sfh < 1e-33), 1e-33, sfh)
     sp.set_tabular_sfh(tax, sfh)
 
-    # Generate spectrum at the stellar age represented by the SFH time axis.
-    t_univ = float(cosmo.age(zval).value)
-    tage = float(np.clip(stellar_age, 1e-3, t_univ))
-    lam, spec = sp.get_spectrum(tage=tage, peraa=peraa)
-
-    if peraa:
-        # FSPS peraa=True returns L_lambda (approximately Lsun/Angstrom).
-        # Convert to observed F_nu and then to microjansky.
-        d_L = cosmo.luminosity_distance(zval).to('cm').value
-        L_sun = 3.828e33
-        c_aa_per_s = 2.99792458e18
-        lam_obs = lam * (1.0 + zval)
-        f_lambda = (spec * L_sun) / (4.0 * np.pi * d_L**2 * (1.0 + zval))
-        f_nu = f_lambda * (lam_obs**2) / c_aa_per_s
-        spec_ujy = (f_nu / 1e-23) * 1e6
-    else:
-        spec_ujy = convert_to_microjansky(spec, zval, cosmo)
+    # Generate spectrum
+    # Add small time offset to get latest SSPs
+    lam, spec = sp.get_spectrum(tage=cosmo.age(zval).value + 1e-4, peraa=peraa)
+    spec_ujy = convert_to_microjansky(spec, zval, cosmo)
 
     # Return based on return_spec parameter
     if isinstance(return_spec, bool):
@@ -506,10 +303,10 @@ def makespec_parametric(specdetails, priors, sp, cosmo, filter_list=[],
             return lam, spec_ujy
         else:
             # Generate photometric SED using dense_basis
-            filcurves, lam_z_filt, _ = db.make_filvalkit_simple(
+            filcurves, _, _ = db.make_filvalkit_simple(
                 lam, zval, fkit_name=filter_list, filt_dir=filt_dir
             )
-            sed = calc_fnu_sed_lam_weighted(spec_ujy, filcurves, lam_z_filt)
+            sed = db.calc_fnu_sed_fast(spec_ujy, filcurves)
             return sed
     else:
         # Interpolate to given wavelength array
