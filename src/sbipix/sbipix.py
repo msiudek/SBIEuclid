@@ -379,16 +379,22 @@ class sbipix():
         Returns:
         None
         """
-        # Load observational features from the survey
+        # Load observational features from the survey.
+        # INTEGRATED-PORT CHANGE: noise-file names are parametrized via the
+        # attributes `obs_prefix` and `limits_file` so a catalog-derived
+        # integrated noise model can be swapped in. Defaults reproduce the
+        # paper's JADES pixel noise model exactly (backward-compatible).
+        pref = getattr(self, 'obs_prefix', 'jades_res_bins')
+        lim_file = getattr(self, 'limits_file', 'background_noise_hainline.npy')
 
         #mean of the distribution of noise in the galaxies for each filter and different bins of flux
-        self.mean_sigma_obs = np.load(self.filter_path+'mean_sigma_jades_res_bins.npy') 
+        self.mean_sigma_obs = np.load(self.filter_path+f'mean_sigma_{pref}.npy')
         #std of the distribution of noise in the galaxies for each filter and different bins of flux
-        self.stds_sigma_obs = np.load(self.filter_path+'std_sigma_jades_res_bins.npy') 
+        self.stds_sigma_obs = np.load(self.filter_path+f'std_sigma_{pref}.npy')
         #different bins of flux for each filter
-        self.percentiles = np.load(self.filter_path+'percentiles_jades_res_bins.npy')
+        self.percentiles = np.load(self.filter_path+f'percentiles_{pref}.npy')
         #1 sigma depth limits for each filter
-        self.limits=np.load(self.filter_path+'background_noise_hainline.npy') 
+        self.limits=np.load(self.filter_path+lim_file)
         
         if self.remove_filters is not None:
                 self.mean_sigma_obs = self.mean_sigma_obs[:, [i for i in range(len(self.mean_sigma_obs[0,:])) if i not in self.remove_filters]]
@@ -774,8 +780,13 @@ class sbipix():
             Posterior samples.
         """
         if not self.infer_z and input_z is not None:
-            input_z = np.repeat(input_z, len(obs), axis=0)
-            obs = np.concatenate([obs, np.reshape(input_z, newshape=(len(obs), 1))], axis=1)
+            # INTEGRATED-PORT CHANGE: accept a per-row redshift array (one z per
+            # catalog galaxy), not only a scalar (one z for all pixels of one
+            # galaxy). Scalar/length-1 input is still broadcast to every row.
+            input_z = np.atleast_1d(np.asarray(input_z, dtype=float))
+            if input_z.shape[0] != len(obs):
+                input_z = np.repeat(input_z, len(obs))
+            obs = np.concatenate([obs, input_z.reshape(len(obs), 1)], axis=1)
         
         posteriors = []
         if bar:
