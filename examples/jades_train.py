@@ -43,6 +43,12 @@ def parse_args():
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--skip-simulate", action="store_true",
                    help="Reuse an existing atlas (atlas is noise-independent)")
+    p.add_argument("--obs-prefix", type=str, default="jades_res_bins",
+                   help="noise-model prefix for load_obs_features: 'jades_res_bins' "
+                        "(paper pixel model, default) or 'jades_integrated' (catalog).")
+    p.add_argument("--limits-file", type=str, default=None,
+                   help="limits npy filename; default background_noise_hainline.npy for "
+                        "the pixel model, else background_noise_<obs-prefix>.npy")
     # paper priors (upstream README / inference_six_gal model)
     p.add_argument("--mass-min", type=float, default=4.0)
     p.add_argument("--mass-max", type=float, default=12.0)
@@ -97,6 +103,11 @@ def main():
     sx.include_limit = True
     sx.condition_sigma = True
     sx.include_sigma = True
+    sx.obs_prefix = args.obs_prefix
+    if args.limits_file is not None:
+        sx.limits_file = args.limits_file
+    elif args.obs_prefix != "jades_res_bins":
+        sx.limits_file = f"background_noise_{args.obs_prefix}.npy"
     sx.load_obs_features()
     sx.add_noise_nan_limit_all()
 
