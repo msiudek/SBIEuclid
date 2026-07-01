@@ -1576,7 +1576,7 @@ class sbipix():
             return np.array(posteriors)
         
 
-    def _get_posterior_obs(self, obs, qphi, n_samples=1000, bar=True, input_z=None,device='cpu'):
+    def _get_posterior_obs(self, obs, qphi, n_samples=1000, bar=True, input_z=None,device='cpu', sample_with='rejection'):
         """
         Generate posterior samples for observed data.
 
@@ -1591,6 +1591,11 @@ class sbipix():
             Whether to show a progress bar.
         - input_z: numpy array, optional
             Input redshift values.
+        - sample_with: str, optional (default='rejection')
+            'direct' samples straight from the NPE flow (qphi.posterior_estimator)
+            with NO leakage/rejection correction -> constant fast time per galaxy,
+            never stalls on out-of-domain objects whose posterior leaks outside the
+            prior box (the 0% acceptance case). 'rejection'/'mcmc' use qphi.sample.
 
         Returns:
         - numpy array
@@ -1614,17 +1619,47 @@ class sbipix():
                     )
             obs = np.concatenate([obs, z_col], axis=1)
         
-        posteriors = []
-        if bar:
-            for i in trange(len(obs)):
-                p = np.array(qphi.sample((n_samples,), x=torch.as_tensor(np.array([obs[i, :]]).astype(np.float32)).to(device), show_progress_bars=False).detach().to('cpu'))
-                posteriors.append(p)
-        else:
-            for i in range(len(obs)):
-                p = np.array(qphi.sample((n_samples,), x=torch.as_tensor(np.array([obs[i, :]]).astype(np.float32)).to(device), show_progress_bars=True).detach().to('cpu'))
-                posteriors.append(p)
+        pe = getattr(qphi, "posterior_estimator", None)
+        use_direct = (sample_with == "direct") and (pe is not None)
+        if sample_with == "direct" and pe is None:
+            print("WARNING: --sample-with direct requested but qphi has no "
+                  "posterior_estimator; falling back to qphi.sample (may stall on leakage).")
 
-        return np.array(posteriors)        
+        # For 'direct' we sample the raw flow (no rejection), which can leak samples
+        # outside the prior box. Clip to the prior support so leaked mass piles at the
+        # boundary (as rejection would keep only the in-box tail) instead of producing
+        # unphysical medians. Galaxies pinned at a bound are prior/ceiling-limited.
+        clip_lo = clip_hi = None
+        if use_direct:
+            prior = getattr(qphi, "prior", None)
+            lo = getattr(prior, "low", None)
+            hi = getattr(prior, "high", None)
+            if (lo is None or hi is None) and prior is not None:
+                bd = getattr(prior, "base_dist", None)
+                lo = getattr(bd, "low", None) if bd is not None else None
+                hi = getattr(bd, "high", None) if bd is not None else None
+            if lo is not None and hi is not None:
+                clip_lo = np.asarray(lo.detach().to('cpu')).ravel()
+                clip_hi = np.asarray(hi.detach().to('cpu')).ravel()
+
+        def _draw(row):
+            x = torch.as_tensor(np.asarray([row]).astype(np.float32)).to(device)
+            if use_direct:
+                # straight from the flow: no rejection -> never stalls on leakage
+                s = pe.sample((n_samples,), condition=x).detach().to('cpu').numpy()
+                s = s.reshape(n_samples, -1)
+                if clip_lo is not None:
+                    s = np.clip(s, clip_lo, clip_hi)
+                return s
+            return np.array(qphi.sample((n_samples,), x=x,
+                                        show_progress_bars=False).detach().to('cpu'))
+
+        posteriors = []
+        it = trange(len(obs)) if bar else range(len(obs))
+        for i in it:
+            posteriors.append(_draw(obs[i, :]))
+
+        return np.array(posteriors)
         
 
     def get_posteriors_resolved(self, phot_arr, n_gal, n_samples=50, save=True, return_stats=True,sigma_arr=None, bar=True, input_z=None, device='cpu', sample_with='rejection'):

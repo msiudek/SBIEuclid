@@ -125,6 +125,14 @@ def parse_args():
                         "samples straight from the NPE flow (fast, no rejection/leakage "
                         "correction) and avoids the 0%%-acceptance stall seen with "
                         "'rejection' on this v3 model.")
+    p.add_argument("--z-max-domain", type=float, default=6.0,
+                   help="Domain pre-cut: drop galaxies with reference z above this. The v3 "
+                        "model was trained to z_max~6; beyond it the NPE flow extrapolates, "
+                        "putting posterior mass outside the prior -> 0%% sampling acceptance / stalls.")
+    p.add_argument("--logm-max-domain", type=float, default=11.0,
+                   help="Domain pre-cut: drop galaxies with reference logM above this. The v3 "
+                        "prior caps logM at 11.39 and the model over-estimates mass, so "
+                        "bright/massive galaxies leak past the ceiling and stall sampling.")
     p.add_argument("--phot-type",   type=str, default="templfit",
                    choices=["templfit", "2fwhm", "3fwhm"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
@@ -239,6 +247,7 @@ def run_inference_at_threshold(sx, qphi, flux_sel, fluxerr_sel, limits, z_sel, a
         bar=True,
         input_z=z_sel,
         device=args.device,
+        sample_with=args.sample_with,
     )
 
     logM_med = np.nanmedian(posteriors[:, :, 0], axis=1)
@@ -347,13 +356,23 @@ def main():
     n_bands_snr = np.sum((snr >= args.snr_min) & np.isfinite(snr), axis=1)
 
     # Selection mask (aligned with training support ranges)
+    # Base cuts (finite + broad training ranges), then a DOMAIN pre-cut to the
+    # region where the v3 flow does NOT leak outside its prior box (avoids the
+    # 0% sampling-acceptance stalls on out-of-domain bright/massive/high-z gal).
     has_z    = np.isfinite(z_ref)  & (z_ref > 0)
     has_mass = np.isfinite(mass_ref) & (mass_ref > TRAIN_LOGM_MIN) & (mass_ref < TRAIN_LOGM_MAX)
     has_sfr = np.ones(len(cat), dtype=bool)
     if sfr_ref_col is not None:
         has_sfr = np.isfinite(sfr_ref) & (sfr_ref > TRAIN_LOGSFR_MIN) & (sfr_ref < TRAIN_LOGSFR_MAX)
     has_bands = n_bands_snr >= args.n_bands_min
-    good = has_z & has_mass & has_sfr & has_bands
+
+    in_domain = (z_ref <= args.z_max_domain) & (mass_ref <= args.logm_max_domain)
+    n_ood_z = int((has_z & (z_ref > args.z_max_domain)).sum())
+    n_ood_m = int((has_mass & (mass_ref > args.logm_max_domain)).sum())
+    print(f"  domain pre-cut (v3 support): excluded {n_ood_z} gal z>{args.z_max_domain:g}, "
+          f"{n_ood_m} gal logM>{args.logm_max_domain:g} (would leak / stall sampling)")
+
+    good = has_z & has_mass & has_sfr & has_bands & in_domain
 
     if sfr_ref_col is not None:
         print(
