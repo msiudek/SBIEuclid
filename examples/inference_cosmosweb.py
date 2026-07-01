@@ -119,8 +119,12 @@ def parse_args():
                    help="Custom noise model prefix. If unset, derived as 'north_{phot_type}'")
     p.add_argument("--catalog",     type=str,   default=None,
                    help="Override input catalog path (default: matched_euclid_cosmosweb.fits)")
-    p.add_argument("--sample-with", type=str, default="rejection", choices=["rejection", "mcmc"],
-                   help="Posterior sampling backend (default: rejection)")
+    p.add_argument("--sample-with", type=str, default="rejection",
+                   choices=["rejection", "mcmc", "direct"],
+                   help="Posterior sampling backend (default: rejection). 'direct' "
+                        "samples straight from the NPE flow (fast, no rejection/leakage "
+                        "correction) and avoids the 0%%-acceptance stall seen with "
+                        "'rejection' on this v3 model.")
     p.add_argument("--phot-type",   type=str, default="templfit",
                    choices=["templfit", "2fwhm", "3fwhm"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
