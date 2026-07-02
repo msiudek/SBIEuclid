@@ -87,23 +87,25 @@ PATCH_ID = 65879
 AB_ZEROPOINT_JY = 3631.0
 AB_ZEROPOINT_UJY = 3631e6
 LN10 = np.log(10.0)
+# Reverted to the ORIGINAL Iglesias-Navarro et al. (2025) priors (Table 2, tau-delayed):
+# pure uniform priors, SFR emerging from the tau-delayed SFH (no sSFRlognormal shaping,
+# no narrowed Z / reduced Av tuning). z_max kept at 5.0 for the Euclid survey scope
+# (Iglesias original is 7.5); everything else matches the paper.
 SIMULATION_CONFIG = {
-    "mass_min": 6.0,
-    "mass_max": 12.5,   # v1.0: raised from 11.5 so the prior/atlas cover the massive
-                        # tail (COSMOS-anchored nnpz cannot; real gal reach >12.5).
-                        # Requires atlas regeneration for the new ceiling to take effect.
-    "sfr_prior_type": "sSFRlognormal",
-    "ssfr_min": -12.5,
-    "ssfr_max": -6.5,   # v3: raised from -7.0; new sSFR prior mean at z>2 reaches ~-8.5 so need headroom
+    "mass_min": 4.0,    # Iglesias Table 2: M*formed ~ U(4, 12)
+    "mass_max": 12.0,
+    "sfr_prior_type": "SFRflat",   # unused by the tau-delayed sampling (SFR from the SFH)
+    "ssfr_min": -12.5,             # kept for the Priors API; not used
+    "ssfr_max": -6.5,
     "z_prior": "flat",
     "z_min": 0.0,
-    "z_max": 5.0,
-    "Z_min": -0.8,
-    "Z_max": 0.3,
+    "z_max": 5.0,       # Euclid survey scope (Iglesias original: 7.5)
+    "Z_min": -2.3,      # Iglesias Table 2: [M/H] ~ U(-2.3, 0.4)
+    "Z_max": 0.4,
     "dust_model": "Calzetti",
     "dust_prior": "flat",
     "Av_min": 0.0,
-    "Av_max": 1.5,   # v3: reduced from 3.0; atlas Av was +1.1 mag above real (mean 1.5 vs ~0.4)
+    "Av_max": 4.0,      # Iglesias Table 2: A_V ~ U(0, 4)
     "tx_alpha": 0.7,
 }
 
