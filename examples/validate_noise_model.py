@@ -924,6 +924,12 @@ def build_parser():
                    help="Number of mock simulations (default: 10000; use smaller only for local smoke tests)")
     p.add_argument("--atlas-name", type=str, default="atlas_obs_euclid_north_validate",
                    help="Atlas stem name for dense_basis (default: atlas_obs_euclid_north_validate)")
+    p.add_argument("--seed", type=int, default=0,
+                   help="RNG seed for atlas generation. Use a DISTINCT seed per parallel "
+                        "shard so shards contain different galaxies (default: 0).")
+    p.add_argument("--simulate-only", action="store_true",
+                   help="Only generate the atlas then exit (skip real-data validation/plots). "
+                        "Use for parallel shard generation; merge shards with merge_atlas.py.")
     p.add_argument("--outdir", default="sbi-logs/validate",
                    help="Output directory for plots (default: sbi-logs/validate)")
     p.add_argument("--skip-simulate", "--skip-sim", action="store_true",
@@ -988,9 +994,14 @@ def main():
     print(f"  calibrate      = {'on' if args.calibrate else 'off'}")
     print(f"  det SNR cut    = {SNR_DETECTION_THRESHOLD}")
 
-    np.random.seed(0)
+    np.random.seed(args.seed)
 
     load_or_simulate_model(model, args, outdir)
+
+    if args.simulate_only:
+        print(f"--simulate-only: atlas '{args.atlas_name}' generated with seed={args.seed} "
+              f"(N={args.n_sim}); skipping validation. Merge shards with examples/merge_atlas.py.")
+        raise SystemExit(0)
 
     debug_i = 0
     debug_band = 0
