@@ -113,6 +113,14 @@ def build_parser():
              "'north_{phot_type}'. Use a distinct prefix for combined-band noise.",
     )
     p.add_argument(
+        "--train-seed",
+        type=int,
+        default=None,
+        help="Seed np.random + torch for reproducible noise injection and network "
+             "init (default: None = nondeterministic, the historical behavior). "
+             "Use distinct seeds to measure training-realization spread.",
+    )
+    p.add_argument(
         "--sigma-sampler",
         choices=["empirical", "truncnorm", "mag_lognormal"],
         default="mag_lognormal",
@@ -140,6 +148,12 @@ def build_parser():
 # CONFIG
 # --------------------------------------------------
 args = build_parser().parse_args()
+
+if args.train_seed is not None:
+    np.random.seed(args.train_seed)
+    torch.manual_seed(args.train_seed)
+    torch.cuda.manual_seed_all(args.train_seed)
+    print(f"Training seed fixed: {args.train_seed} (np.random + torch + cuda)")
 
 # Extract N_sim from the atlas filename if it contains the _<N>_Nparam_<k> pattern.
 # This prevents a mismatch when the user passes e.g. atlas_v2_50000_Nparam_2.dbatlas
