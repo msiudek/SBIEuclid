@@ -63,11 +63,24 @@ def build_phot_col(stem, phot_type, err=False):
 
     phot_type='templfit': flux_{stem}_templfit, except VIS → flux_vis_psf.
     phot_type='2fwhm'/'3fwhm': flux_{stem}_{phot_type}_aper.
+    phot_type='total': reads the 2fwhm aperture columns; the caller then rescales
+        them to MER total fluxes via scale = flux_detection_total/flux_vis_2fwhm_aper
+        (see apply_total_scaling). VIS thus becomes the true total, not the PSF flux.
     """
     prefix = "fluxerr" if err else "flux"
     if phot_type == "templfit":
         return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
+    if phot_type == "total":
+        return f"{prefix}_{stem}_2fwhm_aper"
     return f"{prefix}_{stem}_{phot_type}_aper"
+
+
+def total_scale(cat):
+    """MER-cookbook aperture->total scaling (VIS_DET=1): detection_total / vis_2fwhm."""
+    det = np.array(cat["flux_detection_total"], dtype=float)
+    vis2 = np.array(cat["flux_vis_2fwhm_aper"], dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return det / vis2
 
 
 def validate_requested_phot_type(cat, requested_phot_type):
@@ -125,18 +138,19 @@ def parse_args():
                         "samples straight from the NPE flow (fast, no rejection/leakage "
                         "correction) and avoids the 0%%-acceptance stall seen with "
                         "'rejection' on this v3 model.")
-    p.add_argument("--z-max-domain", type=float, default=6.0,
-                   help="Domain pre-cut: drop galaxies with reference z above this. The v3 "
-                        "model was trained to z_max~6; beyond it the NPE flow extrapolates, "
-                        "putting posterior mass outside the prior -> 0%% sampling acceptance / stalls.")
-    p.add_argument("--logm-max-domain", type=float, default=11.0,
-                   help="Domain pre-cut: drop galaxies with reference logM above this. The v3 "
-                        "prior caps logM at 11.39 and the model over-estimates mass, so "
-                        "bright/massive galaxies leak past the ceiling and stall sampling.")
+    p.add_argument("--z-max-domain", type=float, default=5.0,
+                   help="Domain pre-cut: drop galaxies with reference z above this. Must match "
+                        "the atlas z_max (SIMULATION_CONFIG z_max=5.0); beyond it the NPE flow "
+                        "extrapolates, putting posterior mass outside the prior -> stalls.")
+    p.add_argument("--logm-max-domain", type=float, default=12.4,
+                   help="Domain pre-cut: drop galaxies with reference logM above this. Set just "
+                        "below the atlas mass_max (v1.0: 12.5) so targets stay inside the "
+                        "trained prior box (avoids leakage/ceiling pile-up).")
     p.add_argument("--phot-type",   type=str, default="templfit",
-                   choices=["templfit", "2fwhm", "3fwhm"],
+                   choices=["templfit", "2fwhm", "3fwhm", "total"],
                    help=("Photometry type: 'templfit' (template-fit; VIS uses psf), "
-                         "'2fwhm', or '3fwhm' aperture. Default: templfit"))
+                         "'2fwhm'/'3fwhm' aperture, or 'total' (2fwhm rescaled to MER "
+                         "total flux; fixes the VIS PSF bug). Default: templfit"))
     p.add_argument("--observation-space", type=str, default="flux",
                    choices=["mag", "flux"],
                    help=(
@@ -320,6 +334,21 @@ def main():
             "For 'templfit' the matched catalog must include templfit/psf columns "
             "(re-run the catalog matching script to add them)."
         ) from exc
+
+    # 'total' = 2fwhm aperture rescaled to MER total flux (fixes the VIS PSF bug,
+    # matching the synthetic total photometry the atlas is trained on).
+    if effective_phot_type == "total":
+        try:
+            s = total_scale(cat)[:, None]
+        except KeyError as exc:
+            raise KeyError(
+                f"phot_type='total' needs {exc} (flux_detection_total, "
+                "flux_vis_2fwhm_aper) in the catalog."
+            ) from exc
+        flux = flux * s
+        fluxerr = fluxerr * s
+        print(f"  applied total-flux scaling: median detection_total/vis_2fwhm = "
+              f"{np.nanmedian(s):.3f}")
 
     # Reference values (matched_euclid_cosmosweb.fits: LePhare + z_lephare)
     z_ref    = np.array(cat["z_lephare"],        dtype=float)

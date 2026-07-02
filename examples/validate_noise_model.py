@@ -89,7 +89,9 @@ AB_ZEROPOINT_UJY = 3631e6
 LN10 = np.log(10.0)
 SIMULATION_CONFIG = {
     "mass_min": 6.0,
-    "mass_max": 11.5,
+    "mass_max": 12.5,   # v1.0: raised from 11.5 so the prior/atlas cover the massive
+                        # tail (COSMOS-anchored nnpz cannot; real gal reach >12.5).
+                        # Requires atlas regeneration for the new ceiling to take effect.
     "sfr_prior_type": "sSFRlognormal",
     "ssfr_min": -12.5,
     "ssfr_max": -6.5,   # v3: raised from -7.0; new sSFR prior mean at z>2 reaches ~-8.5 so need headroom

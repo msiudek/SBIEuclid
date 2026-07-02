@@ -19,7 +19,7 @@ OUT_DIR = "."
 # Photometry types to process:
 #   '2fwhm', '3fwhm' → aperture photometry  (flux_{stem}_{type}_aper)
 #   'templfit'       → template-fit (flux_{stem}_templfit; VIS uses flux_vis_psf)
-PHOT_TYPES = ["2fwhm", "3fwhm", "templfit"]
+PHOT_TYPES = ["2fwhm", "3fwhm", "templfit", "total"]
 HEMISPHERE = "north"
 
 PERCENTILE_CUTS = [5.0, 15.0, 30.0, 50.0, 70.0, 90.0]
@@ -43,6 +43,9 @@ def build_phot_col(stem, phot_type, err=False):
         if stem == "vis":
             return f"{prefix}_vis_psf"
         return f"{prefix}_{stem}_templfit"
+    if phot_type == "total":
+        # read 2fwhm columns; load_from_fits rescales to MER total flux
+        return f"{prefix}_{stem}_2fwhm_aper"
     # aperture photometry
     return f"{prefix}_{stem}_{phot_type}_aper"
 
@@ -122,6 +125,18 @@ def load_from_fits(fits_path, entries, phot_type, patch_id=98, skip_patch=False)
 
     phot = np.vstack(phot_list)
     err = np.vstack(err_list)
+
+    if phot_type == "total":
+        # rescale 2fwhm aperture -> MER total flux (VIS_DET=1):
+        #   scale = flux_detection_total / flux_vis_2fwhm_aper   (per source)
+        det = np.array(cat["flux_detection_total"], dtype=float)
+        vis2 = np.array(cat["flux_vis_2fwhm_aper"], dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s = det / vis2
+        phot = phot * s[None, :]
+        err = err * s[None, :]
+        print(f"Applied total scaling (median detection_total/vis_2fwhm = {np.nanmedian(s):.3f})")
+
     print(f"Photometry shape: {phot.shape}")
     return phot, err
 
