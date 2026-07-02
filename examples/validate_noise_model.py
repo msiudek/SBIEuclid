@@ -526,6 +526,14 @@ def load_real_data(fits_path, patch_id=PATCH_ID, phot_type=None, snr_min=SNR_DET
     real_err = np.full((n_filt, n_gal), np.nan)
     real_valid = np.zeros((n_filt, n_gal), dtype=bool)
 
+    # 'total' = 2fwhm aperture rescaled to MER total flux (per source)
+    total_s = None
+    if phot_type == "total":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            total_s = (np.asarray(cat["flux_detection_total"], dtype=float) /
+                       np.asarray(cat["flux_vis_2fwhm_aper"], dtype=float))
+        print(f"  total scaling: median detection_total/vis_2fwhm = {np.nanmedian(total_s):.3f}")
+
     for fi, stem in enumerate(FILTER_COL_STEMS):
         # templfit uses a different column naming convention (no _aper suffix)
         if phot_type == "templfit":
@@ -536,13 +544,18 @@ def load_real_data(fits_path, patch_id=PATCH_ID, phot_type=None, snr_min=SNR_DET
                 fcol = f"flux_{stem}_templfit"
                 ecol = f"fluxerr_{stem}_templfit"
         else:
-            fcol = f"flux_{stem}_{phot_type}_aper"
-            ecol = f"fluxerr_{stem}_{phot_type}_aper"
+            # both '2fwhm'/'3fwhm' and 'total' read the *_aper columns; 'total' rescales
+            ap = "2fwhm" if phot_type == "total" else phot_type
+            fcol = f"flux_{stem}_{ap}_aper"
+            ecol = f"fluxerr_{stem}_{ap}_aper"
         if fcol not in cat.colnames:
             print(f"  WARNING: column {fcol!r} not found — filter {FILTER_SHORT[fi]} skipped")
             continue
         flux = np.asarray(cat[fcol], dtype=float)
         err = np.asarray(cat[ecol], dtype=float) if ecol in cat.colnames else np.full(n_gal, np.nan)
+        if total_s is not None:
+            flux = flux * total_s
+            err = err * total_s
 
         valid = np.isfinite(flux) & np.isfinite(err) & (err > 0)
         snr = np.where(valid, flux / err, np.nan)
@@ -901,7 +914,7 @@ def build_parser():
         description="Pre-training validation: compare mock noise model to real COSMOS data"
     )
     p.add_argument("--phot-type", default="3fwhm",
-                   choices=["2fwhm", "3fwhm", "templfit"],
+                   choices=["2fwhm", "3fwhm", "templfit", "total"],
                    help="Photometry type to use for both real COSMOS photometry and matching noise products (default: 3fwhm)")
     p.add_argument("--filter-list", type=str, default="filters_to_use.dat",
                    help="Filter list file (default: filters_to_use.dat; use filters_to_use_euclid_jwstnir.dat for Euclid+JWST-NIR)")

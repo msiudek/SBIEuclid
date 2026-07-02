@@ -90,12 +90,14 @@ def build_parser():
     )
     p.add_argument(
         "--phot-type",
-        choices=["2fwhm", "3fwhm", "templfit"],
+        choices=["2fwhm", "3fwhm", "templfit", "total"],
         default="templfit",
         help=(
             "Photometry type used for noise model and mock matching. "
             "'templfit' uses template-fit fluxes (flux_{stem}_templfit; VIS: flux_vis_psf). "
-            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. Default: templfit"
+            "'2fwhm'/'3fwhm' use fixed-aperture fluxes. 'total' = 2fwhm rescaled to MER "
+            "total flux (mock matching disabled in flux mode, so used only for the noise "
+            "prefix). Default: templfit"
         ),
     )
     p.add_argument(
@@ -198,6 +200,8 @@ def build_phot_col(stem, phot_type, err=False):
     prefix = "fluxerr" if err else "flux"
     if phot_type == "templfit":
         return f"{prefix}_vis_psf" if stem == "vis" else f"{prefix}_{stem}_templfit"
+    if phot_type == "total":  # 2fwhm columns (rescaled elsewhere); mock-match off in flux mode
+        return f"{prefix}_{stem}_2fwhm_aper"
     return f"{prefix}_{stem}_{phot_type}_aper"
 
 NOISE_PREFIX = args.noise_prefix if args.noise_prefix else f"north_{args.phot_type}"
