@@ -82,6 +82,48 @@ _AGE_MIN_FRAC = float(os.getenv("SBIPIX_AGE_MIN_FRAC", "0.2"))
 _AGE_MAX_FRAC = float(os.getenv("SBIPIX_AGE_MAX_FRAC", "0.7"))
 
 
+def _sample_mass(priors):
+    """Sample logM* from the configured mass prior.
+
+    'flat' (default): uniform in [mass_min, mass_max] (dense_basis behavior).
+    'schechter_flat': mixture of a Schechter-shaped prior (observed SMF form,
+        p(logM) ∝ 10^[(α+1)(logM−logM*)] · exp(−10^(logM−logM*)) ) and a flat
+        floor with weight `mass_flat_frac`. The flat floor keeps training
+        examples at the massive end (a pure SMF has essentially zero density
+        above ~11.3, which would recreate the ceiling problem), while the
+        Schechter body removes the flat-prior high-mass excess that biases
+        prior-dominated posteriors upward.
+    """
+    lo, hi = float(priors.mass_min), float(priors.mass_max)
+    if getattr(priors, "mass_prior_type", "flat") != "schechter_flat":
+        return _to_scalar(priors.sample_mass_prior())
+    f_flat = float(getattr(priors, "mass_flat_frac", 0.2))
+    if np.random.random() < f_flat:
+        return float(np.random.uniform(lo, hi))
+    mstar = float(getattr(priors, "mass_schechter_logmstar", 10.8))
+    alpha = float(getattr(priors, "mass_schechter_alpha", -1.35))
+
+    def logdens(m):
+        return (alpha + 1.0) * (m - mstar) * np.log(10.0) - 10.0 ** (m - mstar)
+
+    ref = logdens(lo)  # density is maximal at the low-mass end for alpha < -1
+    for _ in range(1000):
+        m = float(np.random.uniform(lo, hi))
+        if np.log(np.random.random() + 1e-300) < logdens(m) - ref:
+            return m
+    return float(np.random.uniform(lo, hi))  # fallback (never expected)
+
+
+def _quiescent_fraction(logmass, zval, f_max):
+    """Ilbert+13-like passive fraction: rises with mass, falls with z.
+
+    f_q = f_max · clip((logM − 9)/2, 0, 1) · exp(−z / 1.5)
+    e.g. f_max=0.4: logM=11 gives 0.33 at z=0.3, 0.21 at z=1, 0.11 at z=2.
+    """
+    s_m = np.clip((float(logmass) - 9.0) / 2.0, 0.0, 1.0)
+    return float(f_max) * s_m * np.exp(-max(float(zval), 0.0) / 1.5)
+
+
 def _sample_stellar_age(age_universe_gyr, min_frac=_AGE_MIN_FRAC, max_frac=_AGE_MAX_FRAC):
     """Sample stellar age (Gyr) as a fraction of universe age."""
     age_u = float(age_universe_gyr)
@@ -258,13 +300,21 @@ def generate_atlas_parametric(priors, N_pregrid=10, initial_seed=42, store=True,
         # Sample parameters from priors
         
         zval = _to_scalar(priors.sample_z_prior())
-        massval = _to_scalar(priors.sample_mass_prior())
+        massval = _sample_mass(priors)
         age_gyr = float(cosmology.age(zval).value)
 
         target_log_ssfr = None
         if str(getattr(priors, 'sfr_prior_type', '')).lower() == 'ssfrlognormal':
-            mean_log_ssfr = _mean_log_ssfr(massval, zval)
-            target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
+            f_q = _quiescent_fraction(
+                massval, zval, getattr(priors, 'quiescent_frac_max', 0.0))
+            if np.random.random() < f_q:
+                # quiescent component: passive mode well below the main sequence
+                target_log_ssfr = np.random.normal(
+                    float(getattr(priors, 'quiescent_logssfr_mean', -11.5)),
+                    float(getattr(priors, 'quiescent_logssfr_sigma', 0.5)))
+            else:
+                mean_log_ssfr = _mean_log_ssfr(massval, zval)
+                target_log_ssfr = np.random.normal(mean_log_ssfr, 0.3)
             if hasattr(priors, 'ssfr_min') and hasattr(priors, 'ssfr_max'):
                 target_log_ssfr = float(np.clip(target_log_ssfr, priors.ssfr_min, priors.ssfr_max))
 

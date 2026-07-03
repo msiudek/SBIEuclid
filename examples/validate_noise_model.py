@@ -105,6 +105,20 @@ SIMULATION_CONFIG = {
     "Av_min": 0.0,
     "Av_max": 1.5,   # v3: reduced from 3.0; atlas Av was +1.1 mag above real (mean 1.5 vs ~0.4)
     "tx_alpha": 0.7,
+    # ---- v4 motivated priors ----
+    # Mass: SMF(Schechter)-shaped prior (COSMOS2020-like logM*=10.8, alpha=-1.35)
+    # mixed with a 20% flat floor (keeps massive-end training coverage). Removes
+    # the flat-prior high-mass excess that inflates prior-dominated posteriors.
+    "mass_prior_type": "schechter_flat",
+    "mass_flat_frac": 0.2,
+    "mass_schechter_logmstar": 10.8,
+    "mass_schechter_alpha": -1.35,
+    # sSFR: main-sequence lognormal (as v3) + quiescent mixture component at
+    # log sSFR = -11.5 +/- 0.5 with Ilbert+13-like fraction (rises with mass,
+    # falls with z, capped at 0.4). The atlas previously had NO passive mode.
+    "quiescent_frac_max": 0.4,
+    "quiescent_logssfr_mean": -11.5,
+    "quiescent_logssfr_sigma": 0.5,
 }
 
 

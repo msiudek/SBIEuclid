@@ -599,11 +599,15 @@ class sbipix():
 
         return detected
 
-    def simulate(self, mass_max=12, mass_min=4, sfr_prior_type='SFRflat', 
-                 sfr_min=-9, sfr_max=2, ssfr_min=-12.0, ssfr_max=-7.5, 
-                 z_prior='flat', z_min=0.0, z_max=10.0, Z_min=-2.27, Z_max=0.4, 
-                 dust_model='Calzetti', dust_prior='flat', Av_min=0.0, Av_max=3.0, 
-                 tx_alpha=1.0, Nparam=3):
+    def simulate(self, mass_max=12, mass_min=4, sfr_prior_type='SFRflat',
+                 sfr_min=-9, sfr_max=2, ssfr_min=-12.0, ssfr_max=-7.5,
+                 z_prior='flat', z_min=0.0, z_max=10.0, Z_min=-2.27, Z_max=0.4,
+                 dust_model='Calzetti', dust_prior='flat', Av_min=0.0, Av_max=3.0,
+                 tx_alpha=1.0, Nparam=3,
+                 mass_prior_type='flat', mass_flat_frac=0.2,
+                 mass_schechter_logmstar=10.8, mass_schechter_alpha=-1.35,
+                 quiescent_frac_max=0.0, quiescent_logssfr_mean=-11.5,
+                 quiescent_logssfr_sigma=0.5):
         """
         Simulate a galaxy population using specified priors.
 
@@ -677,6 +681,15 @@ class sbipix():
         priors.Av_max = Av_max
         priors.tx_alpha = tx_alpha
         priors.Nparam = Nparam
+        # v4 motivated priors (see train/simulator.py): SMF-shaped mass prior with
+        # a flat floor, and a quiescent sSFR mixture component.
+        priors.mass_prior_type = mass_prior_type
+        priors.mass_flat_frac = mass_flat_frac
+        priors.mass_schechter_logmstar = mass_schechter_logmstar
+        priors.mass_schechter_alpha = mass_schechter_alpha
+        priors.quiescent_frac_max = quiescent_frac_max
+        priors.quiescent_logssfr_mean = quiescent_logssfr_mean
+        priors.quiescent_logssfr_sigma = quiescent_logssfr_sigma
 
         # Generate atlas based on SFH type
         if self.parametric:
