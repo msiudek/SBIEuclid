@@ -113,6 +113,20 @@ def build_parser():
              "'north_{phot_type}'. Use a distinct prefix for combined-band noise.",
     )
     p.add_argument(
+        "--nblocks",
+        type=int,
+        default=4,
+        help="MAF blocks in the flow (default: 4 = historical Euclid runs). "
+             "Iglesias+2025 used 15. Small flows have rugged loss landscapes: "
+             "training outcome varies ~0.1 nats / ~0.15 dex bias with the seed.",
+    )
+    p.add_argument(
+        "--nhidden",
+        type=int,
+        default=128,
+        help="Hidden units per MADE layer (default: 128 = historical). Paper: 500.",
+    )
+    p.add_argument(
         "--train-seed",
         type=int,
         default=None,
@@ -575,12 +589,13 @@ if args.skip_train:
         )
     print(f"    Skipping training; reusing existing model: {model_file}")
 else:
+    print(f"    Flow architecture: {args.nblocks} MAF blocks x {args.nhidden} hidden")
     sx.train(
         min_thetas=min_thetas,
         max_thetas=max_thetas,
         n_max=n_train_use,
-        nblocks=4,
-        nhidden=128,
+        nblocks=args.nblocks,
+        nhidden=args.nhidden,
         epochs_max=20 if SMOKE_TEST else 200,
         device=_DEVICE,
     )
