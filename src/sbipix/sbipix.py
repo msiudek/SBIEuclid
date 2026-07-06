@@ -1414,10 +1414,11 @@ class sbipix():
         return self._transform_flux_observation_matrix(obs)
 
 
-    def train(self, min_thetas=[6, -10, 0, 0, 0, -2.3, 0, 0], 
-              max_thetas=[12, 3, 1, 1, 1, 0.4, 3, 10], 
-              n_max=1000000, epochs_max=None, nblocks=15, nhidden=500, 
-              val_fraction=0.1, device='cpu'):
+    def train(self, min_thetas=[6, -10, 0, 0, 0, -2.3, 0, 0],
+              max_thetas=[12, 3, 1, 1, 1, 0.4, 3, 10],
+              n_max=1000000, epochs_max=None, nblocks=15, nhidden=500,
+              val_fraction=0.1, device='cpu',
+              learning_rate=None, training_batch_size=None, stop_after_epochs=None):
         """
         Train the neural density estimator using simulation-based inference.
 
@@ -1497,6 +1498,15 @@ class sbipix():
         }
         if epochs_max is not None:
             train_kwargs['max_num_epochs'] = epochs_max
+        # Optimization knobs (None -> sbi defaults: lr=5e-4, batch=50, patience=20).
+        # These decide which optimum training converges to; see train_euclid --lr etc.
+        if learning_rate is not None:
+            train_kwargs['learning_rate'] = learning_rate
+        if training_batch_size is not None:
+            train_kwargs['training_batch_size'] = training_batch_size
+        if stop_after_epochs is not None:
+            train_kwargs['stop_after_epochs'] = stop_after_epochs
+        print(f"    sbi train kwargs: {train_kwargs}")
 
         p_theta_x_est = anpe.train(**train_kwargs)
 

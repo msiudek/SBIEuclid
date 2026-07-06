@@ -127,6 +127,16 @@ def build_parser():
         help="Hidden units per MADE layer (default: 128 = historical). Paper: 500.",
     )
     p.add_argument(
+        "--lr", type=float, default=None,
+        help="Learning rate (default: None = sbi default 5e-4).")
+    p.add_argument(
+        "--batch-size", type=int, default=None,
+        help="Training batch size (default: None = sbi default 50).")
+    p.add_argument(
+        "--patience", type=int, default=None,
+        help="Early-stopping patience in epochs (default: None = sbi default 20). "
+             "Larger values let training escape shallow plateaus.")
+    p.add_argument(
         "--train-seed",
         type=int,
         default=None,
@@ -598,6 +608,9 @@ else:
         nhidden=args.nhidden,
         epochs_max=20 if SMOKE_TEST else 200,
         device=_DEVICE,
+        learning_rate=args.lr,
+        training_batch_size=args.batch_size,
+        stop_after_epochs=args.patience,
     )
 
 
