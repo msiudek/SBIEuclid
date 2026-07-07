@@ -145,6 +145,13 @@ def build_parser():
              "Use distinct seeds to measure training-realization spread.",
     )
     p.add_argument(
+        "--dump-features",
+        action="store_true",
+        help="Save mock training features (noisy flux+sigma, theta, true mags) to "
+             "sbi-logs/train_features_dump.npz after realism/cleaning, then exit. "
+             "Used by the real-vs-mock manifold diagnostic.",
+    )
+    p.add_argument(
         "--sigma-sampler",
         choices=["empirical", "truncnorm", "mag_lognormal"],
         default="mag_lognormal",
@@ -472,6 +479,17 @@ sx.mag   = sx.mag[phys_ok]
 sx.obs   = sx.obs[phys_ok]
 sx.n_simulation = len(sx.theta)
 print(f"    {len(sx.theta)} galaxies after physical range clip (logM: 4-13, logSFR: -4 to 3)")
+
+if args.dump_features:
+    _feat_npz = "./sbi-logs/train_features_dump.npz"
+    np.savez(
+        _feat_npz,
+        mag=np.asarray(sx.mag, dtype=np.float32),
+        theta=np.asarray(sx.theta, dtype=np.float32),
+        obs=np.asarray(sx.obs, dtype=np.float32),
+    )
+    print(f"    --dump-features: saved mock features to {_feat_npz}; exiting.")
+    raise SystemExit(0)
 
 if args.mock_match != "none":
     if args.observation_space == "flux":
