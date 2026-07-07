@@ -37,7 +37,8 @@ def load_real(path):
     flux = np.stack([t[f"flux_{s}_2fwhm_aper"] * scale for s in STEMS], axis=1)
     err = np.stack([t[f"fluxerr_{s}_2fwhm_aper"] * np.abs(scale) for s in STEMS], axis=1)
     z = np.asarray(t["z_lephare"], dtype=float)
-    return flux.astype(float), err.astype(float), z
+    logm_ref = np.asarray(t["logM_lephare"], dtype=float)
+    return flux.astype(float), err.astype(float), z, logm_ref
 
 
 def main():
@@ -54,11 +55,13 @@ def main():
     atl = hickle.load(args.atlas)
     seds = np.asarray(atl["sed"], dtype=float)          # (n_templ, 10), noiseless
     zt = np.asarray(atl["zval"], dtype=float)
+    mt = np.asarray(atl["mstar"], dtype=float)          # log M* of each template
     order = np.argsort(zt)
-    zt, seds = zt[order], seds[order]
+    zt, seds, mt = zt[order], seds[order], mt[order]
 
-    flux, err, z = load_real(args.real_fits)
+    flux, err, z, logm_ref = load_real(args.real_fits)
     n_gal, nb = flux.shape
+    logm_fit = np.full(n_gal, np.nan)
     sel = (z > 0) & (z < zt.max())
     print(f"real galaxies: {n_gal}, in atlas z-range: {sel.sum()}")
 
@@ -90,6 +93,7 @@ def main():
         r = np.where(valid & (model > 0), (d - model) / model, np.nan)
         resid[g] = r
         chi2n[g] = chi2[b] / max(valid.sum() - 1, 1)
+        logm_fit[g] = mt[lo:hi][b] + np.log10(A[b])
         n_fit += 1
 
     print(f"fitted: {n_fit} galaxies (dz={args.dz}, >={args.nbands_min} bands SNR>{args.snr_min})")
@@ -120,8 +124,23 @@ def main():
     print("\nGLOBAL NMAD per band [dex]: " +
           " ".join(f"{LABELS[i]}:{zp_sig[i]:.3f}" for i in range(nb)))
 
+    # Template-fit mass check: chi2 best-fit of OUR OWN atlas at fixed spec-z
+    # ("LePhare with the FSPS atlas"). If this is unbiased while the flow is
+    # +0.3, the atlas SEDs/masses are fine and the offset is the inference
+    # machinery (prior weighting); if this is also +0.3, the atlas physics
+    # itself carries the bias.
+    s = ok & np.isfinite(logm_fit) & np.isfinite(logm_ref)
+    dm = logm_fit[s] - logm_ref[s]
+    r_corr = np.corrcoef(logm_fit[s], logm_ref[s])[0, 1]
+    print(f"\nTEMPLATE-FIT MASS (best-fit atlas SED, free amplitude) vs LePhare, N={s.sum()}:")
+    print(f"  median = {np.median(dm):+.3f}  NMAD = {1.4826*np.median(np.abs(dm-np.median(dm))):.3f}  r = {r_corr:.3f}")
+    for zlo, zhi in ZBINS:
+        b_ = s & (z >= zlo) & (z < zhi)
+        if b_.sum() > 50:
+            print(f"    z {zlo:.1f}-{zhi:.1f}: {np.median(logm_fit[b_]-logm_ref[b_]):+.3f}  n={b_.sum()}")
+
     np.savez(args.out, zp_dex=zp, zp_nmad_dex=zp_sig, resid=resid, chi2n=chi2n,
-             z=z, labels=np.array(LABELS))
+             z=z, labels=np.array(LABELS), logm_fit=logm_fit, logm_ref=logm_ref)
     print(f"saved {args.out}")
 
     fig, ax = plt.subplots(figsize=(10, 5))
