@@ -22,3 +22,5 @@ Rules (learned the hard way from the v3 anomaly, 2026-06/07):
 | 2026-07-06 | server | 990fbea | train | sw_big_lr1e4 (15×500, lr 1e-4, pat 60) | — | 1 | val −0.846 → +0.333 |
 | 2026-07-06 | server | 990fbea | train | sw_lr1e4 (4×128, lr 1e-4) | — | 1 | val +1.44, COLLAPSED r≈0 |
 | 2026-07-07 | local | 484e318 | forensic | compare_v3_vs_retrain + mock test (seed 777, 1000 mocks) | v3 067fd84b | 777 | retrain−v3 = +0.02 on mocks vs +0.17 on real data → off-manifold lottery, case closed |
+| 2026-07-07 | server | 484e318 | train×5 | v1_s1..s5 (v3 atlas, 4×128, templfit noise) | — | 1–5 | s1/s3/s4 COLLAPSED (r≈0); s2 +0.366, s5 +0.392 |
+| 2026-07-07 | local | 55b7c74* | calib | calibrate_zeropoints (fixed-z χ² fit of v3 atlas to Khostovan) | atlas v3 100k | — | per-band ZP ±0.03; VIS −0.07 @z0.5–1.5; **template-fit mass = +0.367 vs LePhare** → the +0.37 is the atlas mapping |
