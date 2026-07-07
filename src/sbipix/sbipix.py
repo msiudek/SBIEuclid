@@ -1550,9 +1550,19 @@ class sbipix():
         -----
         Updates self.means_test, self.stds_test with test results.
         """
-        # Load trained model
-        with open(self.model_path + self.model_name, 'rb') as f:
-            qphi = pickle.load(f)
+        # Load trained model. torch.load with map_location doesn't reach tensors
+        # nested inside pickle objects, so temporarily patch torch.load to remap
+        # CUDA-saved models onto the requested device.
+        import functools as _functools
+        _orig_torch_load = torch.load
+        try:
+            torch.load = _functools.partial(
+                _orig_torch_load, map_location=device, weights_only=False
+            )
+            with open(self.model_path + self.model_name, 'rb') as f:
+                qphi = pickle.load(f)
+        finally:
+            torch.load = _orig_torch_load
 
         # sbi>=0.18 requires setting sampling backend in build_posterior(), not in sample()
         if sample_with != 'rejection':

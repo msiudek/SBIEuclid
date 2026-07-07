@@ -626,6 +626,17 @@ posterior = sx.test_performance(
     device=_DEVICE,
 )
 
+_model_stem = Path(sx.model_name).stem
+_test_npz = f"./sbi-logs/test_perf_{_model_stem}.npz"
+np.savez(
+    _test_npz,
+    means_test=sx.means_test,
+    stds_test=sx.stds_test,
+    theta_true=sx.theta[: posterior.shape[0]],
+    labels=np.array(sx.labels),
+)
+print(f"Saved mock-test predictions: {_test_npz}")
+
 print("Performance test complete!")
 print(f"   - Tested on {posterior.shape[0]} galaxies")
 print(f"   - Posterior shape: {posterior.shape}")
