@@ -58,10 +58,16 @@ def main():
     mt = np.asarray(atl["mstar"], dtype=float)          # log M* of each template
     order = np.argsort(zt)
     zt, seds, mt = zt[order], seds[order], mt[order]
+    # winning-template properties (same sort) for the prior diagnosis
+    t_sfr = np.asarray(atl["sfr"], dtype=float)[order]
+    t_dust = np.asarray(atl["dust"], dtype=float)[order]
+    t_met = np.asarray(atl["met"], dtype=float)[order]
+    t_sfh = np.asarray(atl["sfh_tuple"], dtype=float)[order]
 
     flux, err, z, logm_ref = load_real(args.real_fits)
     n_gal, nb = flux.shape
     logm_fit = np.full(n_gal, np.nan)
+    best_idx = np.full(n_gal, -1, dtype=int)   # index into the z-sorted atlas
     sel = (z > 0) & (z < zt.max())
     print(f"real galaxies: {n_gal}, in atlas z-range: {sel.sum()}")
 
@@ -94,6 +100,7 @@ def main():
         resid[g] = r
         chi2n[g] = chi2[b] / max(valid.sum() - 1, 1)
         logm_fit[g] = mt[lo:hi][b] + np.log10(A[b])
+        best_idx[g] = lo + b
         n_fit += 1
 
     print(f"fitted: {n_fit} galaxies (dz={args.dz}, >={args.nbands_min} bands SNR>{args.snr_min})")
@@ -140,7 +147,9 @@ def main():
             print(f"    z {zlo:.1f}-{zhi:.1f}: {np.median(logm_fit[b_]-logm_ref[b_]):+.3f}  n={b_.sum()}")
 
     np.savez(args.out, zp_dex=zp, zp_nmad_dex=zp_sig, resid=resid, chi2n=chi2n,
-             z=z, labels=np.array(LABELS), logm_fit=logm_fit, logm_ref=logm_ref)
+             z=z, labels=np.array(LABELS), logm_fit=logm_fit, logm_ref=logm_ref,
+             best_idx=best_idx, atlas_z=zt, atlas_mstar=mt, atlas_sfr=t_sfr,
+             atlas_dust=t_dust, atlas_met=t_met, atlas_sfh=t_sfh)
     print(f"saved {args.out}")
 
     fig, ax = plt.subplots(figsize=(10, 5))

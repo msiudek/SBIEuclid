@@ -960,6 +960,13 @@ def build_parser():
     p.add_argument("--calibrate", action="store_true",
                    help="Apply per-band median magnitude calibration after mock-matching: "
                         "mag_corrected = mag_mock - delta where delta = median(detected mock) - median(real)")
+    p.add_argument("--met-min", type=float, default=None,
+                   help="Override metallicity prior lower bound log Z/Zsun "
+                        f"(default: SIMULATION_CONFIG Z_min={SIMULATION_CONFIG['Z_min']}). "
+                        "CIGALE/LePhare grids reach -1.7; test knob for the atlas M/L offset.")
+    p.add_argument("--met-max", type=float, default=None,
+                   help="Override metallicity prior upper bound log Z/Zsun "
+                        f"(default: SIMULATION_CONFIG Z_max={SIMULATION_CONFIG['Z_max']}).")
     return p
 
 
@@ -972,6 +979,14 @@ def main():
     FILTER_SHORT     = [m["short"]    for m in _FILTER_META]
     FILTER_COL_STEMS = [m["col_stem"] for m in _FILTER_META]
     print(f"Loaded {len(_FILTER_META)} filters from {args.filter_list}: {', '.join(FILTER_SHORT)}")
+
+    if args.met_min is not None:
+        SIMULATION_CONFIG["Z_min"] = args.met_min
+    if args.met_max is not None:
+        SIMULATION_CONFIG["Z_max"] = args.met_max
+    if args.met_min is not None or args.met_max is not None:
+        print(f"Metallicity prior override: log Z/Zsun in "
+              f"[{SIMULATION_CONFIG['Z_min']}, {SIMULATION_CONFIG['Z_max']}]")
 
     if args.n_sim < 10000:
         print(f"NOTE: n_sim={args.n_sim} is fine for a local smoke test, but ~10000+ is recommended for validation.")
