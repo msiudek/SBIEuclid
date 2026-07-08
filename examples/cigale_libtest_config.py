@@ -12,16 +12,21 @@ dust2=0.0) so this isolates the stellar-population mass-loss convention only.
 Metallicity is snapped to CIGALE's standard BC03 grid (0.0004, 0.004, 0.008,
 0.02, 0.05).
 
-Each object's row 'redshift' in the data file is used directly (the
-[[redshifting]] redshift= line is left BLANK, which is CIGALE's convention
-for "use the per-object redshift from the data file" -- not a fit axis).
+REDSHIFT: an EXPLICIT small grid (quantile bins of our sample), NOT one
+distinct value per object. Leaving [[redshifting]] redshift= blank + a
+data_file with 400 distinct per-object redshifts blew up to 15.5M models
+(400 x 38784) and crashed savefluxes (ObservationsManager needs a params
+object built from the SED grid alone; the "redshift from data_file" trick
+is a pdf_analysis feature, not reliably supported by savefluxes). With an
+explicit z grid, CIGALE computes each (tau,age,met,z) combo ONCE; objects
+are matched to their NEAREST grid point afterward in compare_libtest.py.
 
 Usage:
     python examples/cigale_libtest_config.py \
         --grid sbi-logs/libtest_grid.fits \
         --out sbi-logs/cigale_libtest
 
-Then on the server:
+Then on the server (pcigale environment):
     cd sbi-logs/cigale_libtest
     pcigale run
     # output: out/models-block-0.fits  (one row per computed model)
@@ -54,7 +59,7 @@ cores = 8
     metallicity = {met_list}
     separation_age = 10
   [[redshifting]]
-    redshift =
+    redshift = {z_list}
 
 [analysis_params]
   bands = Euclid_VIS, Euclid_NISP_Y, Euclid_NISP_J, Euclid_NISP_H, HSC_g, HSC_z, DECam_g, DECam_r, DECam_i, DECam_z
@@ -73,8 +78,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grid", default="sbi-logs/libtest_grid.fits")
     ap.add_argument("--out", default="sbi-logs/cigale_libtest")
-    ap.add_argument("--round-myr", type=float, default=50.0,
+    ap.add_argument("--round-myr", type=float, default=250.0,
                      help="rounding step for tau_main/age_main [Myr] to bound grid size")
+    ap.add_argument("--n-z-bins", type=int, default=15,
+                     help="number of explicit redshift grid points (quantiles of the sample)")
     args = ap.parse_args()
 
     t = Table.read(args.grid)
@@ -84,18 +91,23 @@ def main():
     age_myr = np.clip(age_myr, args.round_myr, 13000)
     met_abs = np.array([nearest_met(m) for m in t["metallicity_absolute"]])
 
+    z_grid = np.unique(np.round(
+        np.quantile(np.asarray(t["z"]), np.linspace(0, 1, args.n_z_bins)), 3))
+    z_snapped = z_grid[np.argmin(np.abs(np.asarray(t["z"])[:, None] - z_grid[None, :]), axis=1)]
+
     t["tau_main_myr_snapped"] = tau_myr
     t["age_main_myr_snapped"] = age_myr
     t["metallicity_snapped"] = met_abs
+    t["z_snapped"] = z_snapped
 
     tau_vals = sorted(set(tau_myr.tolist()))
     age_vals = sorted(set(age_myr.tolist()))
     met_vals = sorted(set(met_abs.tolist()))
-    n_models = len(tau_vals) * len(age_vals) * len(met_vals)
+    n_models = len(tau_vals) * len(age_vals) * len(met_vals) * len(z_grid)
     print(f"grid axes: {len(tau_vals)} tau x {len(age_vals)} age x {len(met_vals)} met "
-          f"= {n_models} models per object x {len(t)} objects")
-    if n_models > 5000:
-        print(f"WARNING: {n_models} models/object is large; increase --round-myr to shrink it.")
+          f"x {len(z_grid)} z = {n_models} models total (shared across all {len(t)} objects)")
+    if n_models > 200_000:
+        print(f"WARNING: {n_models} models is large; increase --round-myr or reduce --n-z-bins.")
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -104,12 +116,13 @@ def main():
         tau_list=", ".join(f"{v:.0f}" for v in tau_vals),
         age_list=", ".join(f"{v:.0f}" for v in age_vals),
         met_list=", ".join(f"{v:g}" for v in met_vals),
+        z_list=", ".join(f"{v:g}" for v in z_grid.tolist()),
     )
     (outdir / "pcigale.ini").write_text(ini)
 
     data = Table()
     data["id"] = t["id"]
-    data["redshift"] = t["z"]
+    data["redshift"] = t["z"]  # not used as a fit axis; z is fixed by the module grid above
     data.write(outdir / "data.fits", overwrite=True)
 
     t.write(outdir / "libtest_grid_snapped.fits", overwrite=True)
@@ -119,14 +132,10 @@ def main():
           f"{outdir/'libtest_grid_snapped.fits'}")
     print("\nNEXT (on the server, in the pcigale environment):")
     print(f"  cd {outdir}")
-    print("  pcigale init   # only if pcigale.ini needs regenerating structure; "
-          "otherwise skip -- the file above is already complete")
-    print("  pcigale check  # sanity check the config")
     print("  pcigale run")
-    print("  -> out/models-block-0.fits has one row per (object, tau, age, met) "
-          "model with columns id, best.sfh.tau_main, best.sfh.age_main, "
-          "best.bc03.metallicity/best.stellar.metallicity, "
-          "best.stellar.m_star, best.sfh.integrated")
+    print(f"  -> out/models-block-0.fits has one row per (tau,age,met,z) model "
+          f"({n_models} rows total, NOT per object); compare_libtest.py does the "
+          f"nearest-point match to each of our {len(t)} objects.")
 
 
 if __name__ == "__main__":

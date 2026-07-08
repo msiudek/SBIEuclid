@@ -5,12 +5,14 @@ Reads:
   sbi-logs/cigale_libtest/out/models-block-0.fits  (from `pcigale run`, server)
   sbi-logs/cigale_libtest/libtest_grid_snapped.fits (written by cigale_libtest_config.py)
 
-For each of our N grid objects, finds CIGALE's model matching its own
-(snapped tau_main, age_main, metallicity) at its own redshift, reads off
-CIGALE's living fraction (stellar.m_star / sfh.integrated, both for 1 Msun
-formed), and compares to FSPS's living fraction at the (unsnapped) same
-point. The ratio isolates the pure SPS-code mass-loss/normalization
-difference -- no photometric fitting involved on either side.
+The CIGALE grid is SHARED across all objects (55,680 (tau,age,met,z) models,
+not one set per object -- see cigale_libtest_config.py). For each of our N
+objects, this finds the CIGALE model nearest in (tau_main, age_main,
+metallicity, z) among the full shared table, reads off CIGALE's living
+fraction (stellar.m_star / sfh.integrated, both for 1 Msun formed), and
+compares to FSPS's living fraction at the (unsnapped) same point. The ratio
+isolates the pure SPS-code mass-loss/normalization difference -- no
+photometric fitting involved on either side.
 
 Usage:
     python examples/compare_libtest.py
@@ -38,34 +40,45 @@ def main():
                 return c
         raise KeyError(f"none of {cands} found in {colnames}")
 
-    c_id = pick(cig.colnames, "id")
     c_tau = pick(cig.colnames, "best.sfh.tau_main", "sfh.tau_main")
     c_age = pick(cig.colnames, "best.sfh.age_main", "sfh.age_main")
     c_met = pick(cig.colnames, "best.stellar.metallicity", "stellar.metallicity")
+    c_z = pick(cig.colnames, "best.universe.redshift", "universe.redshift", "redshift")
     c_mstar = pick(cig.colnames, "best.stellar.m_star", "stellar.m_star")
     c_mform = pick(cig.colnames, "best.sfh.integrated", "sfh.integrated")
 
-    cig_by_id = {}
-    for row in cig:
-        cig_by_id.setdefault(int(row[c_id]), []).append(row)
+    m_tau = np.asarray(cig[c_tau], dtype=float)
+    m_age = np.asarray(cig[c_age], dtype=float)
+    m_met = np.asarray(cig[c_met], dtype=float)
+    m_z = np.asarray(cig[c_z], dtype=float)
+    m_lf = np.asarray(cig[c_mstar], dtype=float) / np.maximum(np.asarray(cig[c_mform], dtype=float), 1e-30)
 
     n = len(snap_t)
+    tau_t = np.asarray(snap_t["tau_main_myr_snapped"], dtype=float)
+    age_t = np.asarray(snap_t["age_main_myr_snapped"], dtype=float)
+    met_t = np.asarray(snap_t["metallicity_snapped"], dtype=float)
+    z_t = np.asarray(snap_t["z_snapped"], dtype=float)
+    z = np.asarray(snap_t["z"])
+
+    # normalize each axis by its own grid spacing so no single axis dominates
+    # the nearest-neighbor distance, then brute-force match (grid is shared,
+    # not per-object, so this is a single N x M search, M~55k -- fast enough).
+    def scale(v):
+        u = np.unique(v)
+        step = np.median(np.diff(np.sort(u))) if len(u) > 1 else 1.0
+        return step if step > 0 else 1.0
+
+    s_tau, s_age, s_met, s_z = scale(m_tau), scale(m_age), scale(m_met), scale(m_z)
+
     ratio = np.full(n, np.nan)
     fsps_lf = np.full(n, np.nan)
     cig_lf = np.full(n, np.nan)
-    z = np.asarray(snap_t["z"])
 
     for i in range(n):
-        oid = int(snap_t["id"][i])
-        rows = cig_by_id.get(oid, [])
-        if not rows:
-            continue
-        tau_t, age_t, met_t = (snap_t["tau_main_myr_snapped"][i],
-                                snap_t["age_main_myr_snapped"][i],
-                                snap_t["metallicity_snapped"][i])
-        best = min(rows, key=lambda r: abs(r[c_tau] - tau_t) + abs(r[c_age] - age_t)
-                   + 1e3 * abs(r[c_met] - met_t))
-        cig_lf[i] = float(best[c_mstar]) / max(float(best[c_mform]), 1e-30)
+        d = (np.abs(m_tau - tau_t[i]) / s_tau + np.abs(m_age - age_t[i]) / s_age
+             + np.abs(m_met - met_t[i]) / s_met + np.abs(m_z - z_t[i]) / s_z)
+        j = int(np.argmin(d))
+        cig_lf[i] = m_lf[j]
         fsps_lf[i] = fsps_t["fsps_living_frac"][i]
         ratio[i] = fsps_lf[i] / cig_lf[i] if cig_lf[i] > 0 else np.nan
 
