@@ -607,7 +607,8 @@ class sbipix():
                  mass_prior_type='flat', mass_flat_frac=0.2,
                  mass_schechter_logmstar=10.8, mass_schechter_alpha=-1.35,
                  quiescent_frac_max=0.0, quiescent_logssfr_mean=-11.5,
-                 quiescent_logssfr_sigma=0.5):
+                 quiescent_logssfr_sigma=0.5,
+                 isochrone_type=None, add_stellar_remnants=True):
         """
         Simulate a galaxy population using specified priors.
 
@@ -697,8 +698,10 @@ class sbipix():
             generate_atlas_parametric(
                 priors, N_pregrid=self.n_simulation,
                 fname=self.atlas_name, store=True, path=self.atlas_path,
-                filter_list=dense_basis_filter_list, filt_dir=self.filter_path, 
-                norm_method='none'
+                filter_list=dense_basis_filter_list, filt_dir=self.filter_path,
+                norm_method='none',
+                isochrone_type=isochrone_type,
+                add_stellar_remnants=add_stellar_remnants,
             )
         else:
             print("Generating non-parametric (Dirichlet) SFH atlas...")

@@ -967,6 +967,11 @@ def build_parser():
     p.add_argument("--met-max", type=float, default=None,
                    help="Override metallicity prior upper bound log Z/Zsun "
                         f"(default: SIMULATION_CONFIG Z_max={SIMULATION_CONFIG['Z_max']}).")
+    p.add_argument("--isochrone-type", default=None,
+                   help="FSPS isochrone library override, e.g. padova_1994. Re-tests the "
+                        "2026-06-04 knob (found no effect pre-VIS-fix) on today's setup.")
+    p.add_argument("--no-stellar-remnants", action="store_true",
+                   help="Exclude compact remnants from FSPS stellar_mass (default: included).")
     return p
 
 
@@ -987,6 +992,12 @@ def main():
     if args.met_min is not None or args.met_max is not None:
         print(f"Metallicity prior override: log Z/Zsun in "
               f"[{SIMULATION_CONFIG['Z_min']}, {SIMULATION_CONFIG['Z_max']}]")
+    if args.isochrone_type is not None:
+        SIMULATION_CONFIG["isochrone_type"] = args.isochrone_type
+        print(f"FSPS isochrone_type override: {args.isochrone_type}")
+    if args.no_stellar_remnants:
+        SIMULATION_CONFIG["add_stellar_remnants"] = False
+        print("FSPS add_stellar_remnants: False")
 
     if args.n_sim < 10000:
         print(f"NOTE: n_sim={args.n_sim} is fine for a local smoke test, but ~10000+ is recommended for validation.")
