@@ -57,7 +57,9 @@ cores = 8
     redshift =
 
 [analysis_params]
-  variables = stellar.m_star, sfh.integrated, stellar.age_m_star
+  bands = Euclid_VIS, Euclid_NISP_Y, Euclid_NISP_J, Euclid_NISP_H, HSC_g, HSC_z, DECam_g, DECam_r, DECam_i, DECam_z
+  properties = stellar.m_star, sfh.integrated, stellar.age_m_star
+  additionalerror = 0.0
   save_sed = False
   blocks = 1
 """
